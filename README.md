@@ -42,7 +42,7 @@ From a PowerShell window:
 ```powershell
 cd UPSflow
 py -3.13 -m venv .venv
-.\\.venv\\Scripts\\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
@@ -118,13 +118,13 @@ NSSM runs the existing `python upsflow.py monitor` process continuously. The GUI
 Install NSSM so `nssm.exe` is in PATH, or pass its full path to the installer. From an **Administrator PowerShell** in the UPSflow directory:
 
 ```powershell
-.\\install-service.ps1
+.\install-service.ps1
 ```
 
 If NSSM is not in PATH:
 
 ```powershell
-.\\install-service.ps1 -NssmPath C:\\path\\to\\nssm.exe
+.\install-service.ps1 -NssmPath C:\path\to\nssm.exe
 ```
 
 Then start the service:
@@ -137,13 +137,26 @@ Get-Service UPSflow
 The service is configured for automatic startup and automatic restart after an unexpected process exit. Its Python console refresh output is discarded because the GUI provides the human-readable display. Python logging is retained in:
 
 ```text
-logs\\service-error.log
+logs\service-error.log
 ```
+
+### Moving UPSflow
+
+The installer derives all application paths from `$PSScriptRoot`, so the UPSflow directory itself can live anywhere. Windows services, however, store the resolved executable/script paths when the service is registered; they cannot automatically follow a directory that is subsequently moved.
+
+After moving the entire UPSflow directory, open **Administrator PowerShell** in its new location and run:
+
+```powershell
+.\reinstall-service.ps1
+Start-Service UPSflow
+```
+
+The relocation helper invokes the installer from the new directory, causing NSSM to register the service with the new paths. No path inside the script needs to be edited.
 
 To remove the service without deleting UPSflow files or logs:
 
 ```powershell
-.\\remove-service.ps1
+.\remove-service.ps1
 ```
 
 ### Bluetooth service account
