@@ -1,8 +1,8 @@
 # UPSflow
 
-UPSflow is a small Windows-native, read-only BLE monitor for two EcoFlow River 2 units. It is intended to become the telemetry source for the Keymaster/RFZ query chain.
+UPSflow is a small Windows-native, read-only BLE monitor for two EcoFlow River 2 units. It is the telemetry source for the Keymaster/RFZ query chain.
 
-The first phase deliberately does **not** modify RFZ, Keymaster, Docker, or the EcoFlow configuration. It only proves that the existing Windows host can maintain BLE connections to both River 2 units and read the telemetry we need.
+UPSflow maintains the BLE telemetry stream continuously and exposes the latest cached state through a small local HTTP API. The console `poll_seconds` setting only controls how often the display redraws.
 
 ## Telemetry
 
@@ -61,7 +61,7 @@ Copy-Item config.example.json config.json
 notepad config.json
 ```
 
-Fill in the EcoFlow user ID and assign the units:
+Fill in the EcoFlow user ID and assign the units. The API listens on TCP port 5005 by default:
 
 ```json
 {
@@ -69,6 +69,8 @@ Fill in the EcoFlow user ID and assign the units:
   "poll_seconds": 2,
   "ac_present_voltage": 80.0,
   "stale_seconds": 15,
+  "http_host": "0.0.0.0",
+  "http_port": 5005,
   "devices": {
     "server": {
       "address": "..."
@@ -86,6 +88,14 @@ Then:
 python upsflow.py monitor
 ```
 
+### Telemetry API
+
+`GET /health` returns a simple service-health response.
+
+`GET /v1/telemetry` returns the latest cached telemetry for the configured `server` and `network` River 2s. It is read-only and does not expose EcoFlow credentials or control operations.
+
+The Keymaster container is expected to reach this API at `http://host.docker.internal:5005`.
+
 ## What to test first
 
 1. Confirm both River 2s are discovered.
@@ -94,8 +104,7 @@ python upsflow.py monitor
 4. With utility AC present and solar carrying the load, verify `AC input: YES` even when `AC watts` is low or zero.
 5. If practical, interrupt utility AC to one unit and verify it changes to `AC input: NO` while the battery continues supplying the load.
 6. Restore AC and verify it returns to `YES`.
-
-If AC voltage is not populated correctly on the River 2 firmware in use, the next step will be to capture the inverter heartbeat and adjust the parser. No RFZ integration should be added until this basic telemetry is trustworthy.
+7. With UPSflow running, verify `http://localhost:5005/health` and `http://localhost:5005/v1/telemetry` from the Windows host.
 
 ## Read-only by design
 

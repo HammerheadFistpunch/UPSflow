@@ -50,10 +50,6 @@ RIVER2_PREFIXES = (b"R601", b"R603")
 class UPSFlowRiver2(river2.Device):
     """River 2 with the AC input telemetry needed by UPSflow."""
 
-    # The upstream River 2 implementation exposes AC input watts, but not the
-    # inverter's AC input voltage/current. Voltage is important here because a
-    # River 2 can be connected to AC while deliberately drawing almost no AC
-    # power when solar is carrying the load.
     ac_input_voltage = raw_field(river2.pb_inv.ac_in_vol, pdiv(1000, 2)).default_when_missing(0)
     ac_input_current = raw_field(river2.pb_inv.ac_in_amp, pdiv(1000, 2)).default_when_missing(0)
 
@@ -130,14 +126,11 @@ async def connect_device(
             raise error
         LOG.info("%s authenticated: %s", state.key, status)
 
-        # The upstream library parses pushed heartbeat packets. This callback is
-        # deliberately only used to timestamp fresh telemetry; UPSflow never sends
-        # a control packet to the River 2.
         parser = eflib.get_fixed_length_coding_device(state.device)
         if parser is not None:
             parser.on_message_processed(lambda _message: setattr(state, "last_update", time.monotonic()))
 
-    except Exception as exc:  # BLE libraries expose several platform-specific exception types.
+    except Exception as exc:
         state.last_error = f"{type(exc).__name__}: {exc}"
         LOG.exception("%s connection failed", state.key)
 
@@ -179,15 +172,100 @@ def format_device(state: DeviceState, stale_seconds: int) -> list[str]:
     return lines
 
 
+def telemetry_device(state: DeviceState, stale_seconds: int) -> dict[str, Any]:
+    d = state.device
+    battery = float(value(d, "battery_level", 0))
+    ac_w = float(value(d, "ac_input_power", 0))
+    ac_v = float(value(d, "ac_input_voltage", 0))
+    solar_w = float(value(d, "solar_input_power", 0))
+    total_in = float(value(d, "input_power", 0))
+    output = float(value(d, "output_power", 0))
+    age = None if state.last_update == 0 else max(0.0, time.monotonic() - state.last_update)
+    threshold = float(CONFIG.get("ac_present_voltage", 80.0))
+    stale = age is None or age > stale_seconds
+    return {
+        "connected": bool(d.is_connected),
+        "battery_percent": battery,
+        "ac_present": ac_v >= threshold,
+        "ac_voltage": ac_v,
+        "ac_watts": ac_w,
+        "solar_watts": solar_w,
+        "total_input_watts": total_in,
+        "output_watts": output,
+        "telemetry_age_seconds": age,
+        "stale": stale,
+        "error": state.last_error,
+    }
+
+
+def telemetry_snapshot(states: list[DeviceState], stale_seconds: int) -> dict[str, Any]:
+    return {
+        "service": "UPSflow",
+        "read_only": True,
+        "stale_seconds": stale_seconds,
+        "devices": {state.key: telemetry_device(state, stale_seconds) for state in states},
+    }
+
+
+async def http_response(writer: asyncio.StreamWriter, status: int, payload: dict[str, Any]) -> None:
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    reason = {200: "OK", 404: "Not Found", 405: "Method Not Allowed"}.get(status, "Error")
+    headers = (
+        f"HTTP/1.1 {status} {reason}\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+    writer.write(headers + body)
+    await writer.drain()
+    writer.close()
+    await writer.wait_closed()
+
+
+async def handle_http_client(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    states: list[DeviceState],
+    stale_seconds: int,
+) -> None:
+    try:
+        request_line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+        parts = request_line.decode("ascii", "ignore").strip().split()
+        if len(parts) < 2:
+            await http_response(writer, 405, {"status": "error", "detail": "invalid request"})
+            return
+        method, target = parts[0].upper(), parts[1].split("?", 1)[0]
+        while True:
+            line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            if not line or line in {b"\r\n", b"\n"}:
+                break
+        if method != "GET":
+            await http_response(writer, 405, {"status": "error", "detail": "GET required"})
+        elif target == "/health":
+            await http_response(writer, 200, {"status": "ok", "service": "UPSflow"})
+        elif target == "/v1/telemetry":
+            await http_response(writer, 200, telemetry_snapshot(states, stale_seconds))
+        else:
+            await http_response(writer, 404, {"status": "error", "detail": "not found"})
+    except (asyncio.TimeoutError, ConnectionError, UnicodeError):
+        try:
+            await http_response(writer, 405, {"status": "error", "detail": "invalid request"})
+        except Exception:
+            writer.close()
+    except Exception:
+        writer.close()
+    finally:
+        if not writer.is_closing():
+            writer.close()
+
+
 async def monitor(config: dict[str, Any], config_path: Path) -> None:
     global CONFIG
     CONFIG = config
 
     user_id = os.getenv("ECOFLOW_USER_ID") or str(config.get("user_id", "")).strip()
     if not user_id or user_id == "YOUR_ECOFLOW_USER_ID":
-        raise SystemExit(
-            "EcoFlow user ID is required. Put it in config.json or set ECOFLOW_USER_ID."
-        )
+        raise SystemExit("EcoFlow user ID is required. Put it in config.json or set ECOFLOW_USER_ID.")
 
     device_entries = config.get("devices", {})
     states: list[DeviceState] = []
@@ -201,7 +279,6 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
         scanner_devices = await BleakScanner.discover(return_adv=True)
         match = scanner_devices.get(address)
         if match is None:
-            # Windows BLE addresses can change representation; scan by normalized address.
             for candidate_address, pair in scanner_devices.items():
                 if candidate_address.lower() == address.lower():
                     match = pair
@@ -226,6 +303,14 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
 
     poll_seconds = max(1, int(config.get("poll_seconds", 2)))
     stale_seconds = max(poll_seconds * 2, int(config.get("stale_seconds", 15)))
+    http_host = str(config.get("http_host", "0.0.0.0")).strip() or "0.0.0.0"
+    http_port = max(1, int(config.get("http_port", 5005)))
+    http_server = await asyncio.start_server(
+        lambda reader, writer: handle_http_client(reader, writer, states, stale_seconds),
+        http_host,
+        http_port,
+    )
+    LOG.info("Telemetry API listening on %s:%d", http_host, http_port)
 
     try:
         while True:
@@ -237,10 +322,12 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
                 for line in format_device(state, stale_seconds):
                     print(line)
                 print()
-            print(f"Refresh: {poll_seconds}s   Config: {config_path}")
+            print(f"Refresh: {poll_seconds}s   API: http://{http_host}:{http_port}/v1/telemetry   Config: {config_path}")
             print("Read-only mode: UPSflow sends no EcoFlow control commands.")
             await asyncio.sleep(poll_seconds)
     finally:
+        http_server.close()
+        await http_server.wait_closed()
         await asyncio.gather(
             *(state.device.disconnect() for state in states if state.device.is_connected),
             return_exceptions=True,
