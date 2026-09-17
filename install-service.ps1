@@ -31,8 +31,20 @@ if (-not (Test-Path $NssmPath)) {
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
+# Stopping/removing a not-yet-existing service writes an expected message to stderr.
+# On PowerShell 7+, $PSNativeCommandUseErrorActionPreference can turn that stderr
+# output into a terminating error when $ErrorActionPreference = "Stop" is set, so
+# both are relaxed just for these two calls.
+$prevEAP = $ErrorActionPreference
+$prevNativeEAP = $PSNativeCommandUseErrorActionPreference
+$ErrorActionPreference = "SilentlyContinue"
+$PSNativeCommandUseErrorActionPreference = $false
+
 & $NssmPath stop $ServiceName 2>$null | Out-Null
 & $NssmPath remove $ServiceName confirm 2>$null | Out-Null
+
+$ErrorActionPreference = $prevEAP
+$PSNativeCommandUseErrorActionPreference = $prevNativeEAP
 
 & $NssmPath install $ServiceName $Python
 & $NssmPath set $ServiceName AppDirectory $AppDir
