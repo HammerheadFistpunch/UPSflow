@@ -59,7 +59,7 @@ class UPSflowGUI(tk.Tk):
         for key, title in (("server", "SERVER"), ("network", "NETWORK")):
             self._add_device_card(outer, key, title)
 
-        log_frame = ttk.LabelFrame(outer, text="Service log", padding=6)
+        log_frame = ttk.LabelFrame(outer, text="Status log", padding=6)
         log_frame.pack(fill="both", expand=True, pady=(10, 0))
         self.log = tk.Text(log_frame, height=6, wrap="word", state="disabled")
         self.log.pack(fill="both", expand=True)
