@@ -15,10 +15,32 @@ from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
-import custom_components.ef_ble.eflib as eflib
-from custom_components.ef_ble.eflib.devices import river2
-from custom_components.ef_ble.eflib.props.raw_data_field import raw_field
-from custom_components.ef_ble.eflib.props.transforms import pdiv, pround
+# ha-ef-ble is packaged as a Home Assistant integration, so importing
+# custom_components.ef_ble would execute its Home Assistant-dependent __init__.py.
+# UPSflow only needs the standalone eflib package. Add the installed integration's
+# package directory directly to sys.path, following the same standalone approach
+# used by the upstream ef-ble-wrapper project.
+def _load_eflib_path() -> None:
+    candidates = [
+        Path(__file__).resolve().parent / ".venv" / "Lib" / "site-packages" / "custom_components" / "ef_ble",
+        Path(sys.prefix) / "Lib" / "site-packages" / "custom_components" / "ef_ble",
+    ]
+    for path in candidates:
+        if (path / "eflib" / "__init__.py").is_file():
+            sys.path.insert(0, str(path))
+            return
+    raise RuntimeError(
+        "Could not locate the installed ha-ef-ble eflib package. "
+        "Run 'python -m pip install -r requirements.txt' in the UPSflow virtual environment."
+    )
+
+
+_load_eflib_path()
+
+import eflib
+from eflib.devices import river2
+from eflib.props.raw_data_field import raw_field
+from eflib.props.transforms import pdiv
 
 LOG = logging.getLogger("upsflow")
 DEFAULT_CONFIG = Path("config.json")
