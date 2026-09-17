@@ -42,7 +42,10 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 & $NssmPath set $ServiceName Start SERVICE_AUTO_START
 & $NssmPath set $ServiceName AppExit Default Restart
 & $NssmPath set $ServiceName AppRestartDelay 5000
-& $NssmPath set $ServiceName AppStdout (Join-Path $LogDir "service.log")
+
+# monitor's screen-refresh output is intentionally discarded when running as a service.
+# Python logging goes to stderr and is retained below for diagnostics.
+& $NssmPath set $ServiceName AppStdout NUL
 & $NssmPath set $ServiceName AppStderr (Join-Path $LogDir "service-error.log")
 & $NssmPath set $ServiceName AppRotateFiles 1
 & $NssmPath set $ServiceName AppRotateOnline 1
@@ -52,7 +55,7 @@ Write-Host "UPSflow service installed."
 Write-Host "  Service: $ServiceName"
 Write-Host "  Program: $Python"
 Write-Host "  Arguments: $Script monitor"
-Write-Host "  Logs: $LogDir"
+Write-Host "  Error log: $(Join-Path $LogDir 'service-error.log')"
 Write-Host ""
 Write-Host "Start it with:  Start-Service $ServiceName"
 Write-Host "Check it with:  Get-Service $ServiceName"
