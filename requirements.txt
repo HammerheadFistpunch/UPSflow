@@ -1,2 +1,4 @@
 # EcoFlow BLE protocol implementation. Pinned so telemetry behavior is reproducible.
-ha-ef-ble @ git+https://github.com/rabits/ha-ef-ble.git@89fa21c113f38640b65fdaa9329a918a14d9efd3
+# Editable VCS install intentionally keeps the integration source tree available;
+# ha-ef-ble's eflib is not included in its wheel package metadata.
+-e git+https://github.com/rabits/ha-ef-ble.git@89fa21c113f38640b65fdaa9329a918a14d9efd3#egg=ha-ef-ble
