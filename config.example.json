@@ -1,0 +1,14 @@
+{
+  "user_id": "YOUR_ECOFLOW_USER_ID",
+  "poll_seconds": 2,
+  "ac_present_voltage": 80.0,
+  "stale_seconds": 15,
+  "devices": {
+    "server": {
+      "address": "BLE_ADDRESS_OF_SERVER_RIVER_2"
+    },
+    "network": {
+      "address": "BLE_ADDRESS_OF_NETWORK_RIVER_2"
+    }
+  }
+}
