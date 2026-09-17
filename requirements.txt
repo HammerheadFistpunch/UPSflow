@@ -1,0 +1,2 @@
+# EcoFlow BLE protocol implementation. Pinned so telemetry behavior is reproducible.
+ha-ef-ble @ git+https://github.com/rabits/ha-ef-ble.git@89fa21c113f38640b65fdaa9329a918a14d9efd3
