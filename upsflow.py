@@ -17,20 +17,20 @@ from bleak.backends.scanner import AdvertisementData
 
 # ha-ef-ble is packaged as a Home Assistant integration, so importing
 # custom_components.ef_ble would execute its Home Assistant-dependent __init__.py.
-# UPSflow only needs the standalone eflib package. Add the installed integration's
-# package directory directly to sys.path, following the same standalone approach
-# used by the upstream ef-ble-wrapper project.
+# UPSflow only needs the standalone eflib package. The dependency is installed
+# editable so its source tree remains available inside the virtual environment.
 def _load_eflib_path() -> None:
+    repo_root = Path(__file__).resolve().parent
     candidates = [
-        Path(__file__).resolve().parent / ".venv" / "Lib" / "site-packages" / "custom_components" / "ef_ble",
-        Path(sys.prefix) / "Lib" / "site-packages" / "custom_components" / "ef_ble",
+        repo_root / ".venv" / "src" / "ha-ef-ble" / "custom_components" / "ef_ble",
+        Path(sys.prefix) / "src" / "ha-ef-ble" / "custom_components" / "ef_ble",
     ]
     for path in candidates:
         if (path / "eflib" / "__init__.py").is_file():
             sys.path.insert(0, str(path))
             return
     raise RuntimeError(
-        "Could not locate the installed ha-ef-ble eflib package. "
+        "Could not locate the ha-ef-ble eflib source package. "
         "Run 'python -m pip install -r requirements.txt' in the UPSflow virtual environment."
     )
 
