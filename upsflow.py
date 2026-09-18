@@ -192,11 +192,59 @@ def format_device(state: DeviceState, stale_seconds: int) -> list[str]:
     return lines
 
 
+TELEMETRY_FIELDS = (
+    "battery_level",
+    "input_power",
+    "output_power",
+    "cell_temperature",
+    "ac_input_power",
+    "ac_output_power",
+    "ac_input_voltage",
+    "ac_input_current",
+    "ac_ports",
+    "ac_xboost",
+    "ac_charging_speed",
+    "ac_charging_power_min",
+    "ac_charging_power_max",
+    "dc_port_input_power",
+    "solar_input_power",
+    "car_input_power",
+    "dc_mode",
+    "dc_12v_port",
+    "dc12v_output_power",
+    "dc_charging_max_amps",
+    "dc_charging_current_max",
+    "usbc_output_power",
+    "usba_output_power",
+    "energy_backup",
+    "energy_backup_battery_level",
+    "battery_charge_limit_min",
+    "battery_charge_limit_max",
+    "remaining_time_charging",
+    "remaining_time_discharging",
+)
+
+
+def json_value(raw: Any) -> Any:
+    """Convert eflib values/enums into JSON-safe native values without losing raw telemetry."""
+    if raw is None or isinstance(raw, (str, int, float, bool)):
+        return raw
+    if isinstance(raw, (list, tuple)):
+        return [json_value(item) for item in raw]
+    if isinstance(raw, dict):
+        return {str(key): json_value(item) for key, item in raw.items()}
+    name = getattr(raw, "name", None)
+    if name is not None:
+        return str(name)
+    return str(raw)
+
+
 def telemetry_device(state: DeviceState, stale_seconds: int) -> dict[str, Any]:
     d = state.device
     battery = float(value(d, "battery_level", 0))
     ac_w = float(value(d, "ac_input_power", 0))
     ac_v = float(value(d, "ac_input_voltage", 0))
+    ac_out_w = float(value(d, "ac_output_power", 0))
     dc_w = float(value(d, "dc_port_input_power", 0))
     dc_mode = dc_mode_label(getattr(d, "dc_mode", None))
     total_in = float(value(d, "input_power", 0))
@@ -209,12 +257,18 @@ def telemetry_device(state: DeviceState, stale_seconds: int) -> dict[str, Any]:
     age = None if state.last_update == 0 else max(0.0, time.monotonic() - state.last_update)
     threshold = float(CONFIG.get("ac_present_voltage", 80.0))
     stale = age is None or age > stale_seconds
+
+    raw = {field: json_value(getattr(d, field, None)) for field in TELEMETRY_FIELDS}
     return {
         "connected": bool(d.is_connected),
+        "name": json_value(getattr(d, "name", None)),
+        "serial_number": json_value(getattr(d, "serial_number", None)),
+        "address": json_value(getattr(d, "address", None)),
         "battery_percent": battery,
         "ac_present": ac_v >= threshold,
         "ac_voltage": ac_v,
         "ac_watts": ac_w,
+        "ac_output_watts": ac_out_w,
         "dc_in_watts": dc_w,
         "dc_state": dc_mode,
         "total_input_watts": total_in,
@@ -227,6 +281,7 @@ def telemetry_device(state: DeviceState, stale_seconds: int) -> dict[str, Any]:
         "telemetry_age_seconds": age,
         "stale": stale,
         "error": state.last_error,
+        "raw_telemetry": raw,
     }
 
 
