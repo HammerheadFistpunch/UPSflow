@@ -324,6 +324,63 @@ async def control_dc_port(
     }
 
 
+async def apply_control(
+    states: list[DeviceState], key: str, control: str, value: Any
+) -> dict[str, Any]:
+    state = find_device(states, key)
+    if state is None:
+        raise KeyError(f"device not configured: {key}")
+    if not state.device.is_connected:
+        raise ConnectionError(f"{key} is not connected")
+
+    controls = {
+        "ac": ("enable_ac_ports", bool),
+        "dc": ("enable_dc_12v_port", bool),
+        "xboost": ("enable_ac_xboost", bool),
+        "ac_always_on": ("enable_ac_always_on", bool),
+        "energy_backup": ("enable_energy_backup", bool),
+        "backup_reserve": ("set_energy_backup_battery_level", float),
+        "charge_min": ("set_battery_charge_limit_min", float),
+        "charge_max": ("set_battery_charge_limit_max", float),
+        "dc_amps": ("set_dc_charging_amps_max", float),
+        "dc_mode": ("set_dc_mode", str),
+        "ac_charge_watts": ("set_ac_charging_speed", float),
+    }
+    spec = controls.get(control)
+    if spec is None:
+        raise ValueError(f"unsupported control: {control}")
+    method_name, value_type = spec
+
+    if value_type is bool:
+        if not isinstance(value, bool):
+            raise ValueError(f"{control} requires a boolean value")
+        converted = value
+    elif value_type is float:
+        if isinstance(value, bool):
+            raise ValueError(f"{control} requires a numeric value")
+        try:
+            converted = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{control} requires a numeric value") from exc
+    else:
+        converted = str(value).upper()
+        if control == "dc_mode" and converted not in {"AUTO", "SOLAR", "CAR"}:
+            raise ValueError("dc_mode must be AUTO, SOLAR, or CAR")
+
+    if control == "dc_mode":
+        converted = river2.DCMode[converted]
+
+    result = await getattr(state.device, method_name)(converted)
+    if result is False:
+        raise ValueError(f"{control} rejected by device constraints")
+    return {
+        "status": "ok",
+        "device": key,
+        "control": control,
+        "requested": converted.name if isinstance(converted, river2.DCMode) else converted,
+    }
+
+
 async def wait_for_dc_state(
     state: DeviceState, expected: bool, timeout_seconds: float = 10.0
 ) -> bool:
@@ -441,16 +498,55 @@ let __upsflowRefreshBusy=false;\nasync function refresh(){if(__upsflowRefreshBus
 </script></body></html>"""
 
 CONTROLS_HTML = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>UPSflow Controls / Test</title>
-<style>body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f4f6;color:#17202a}main{max-width:800px;margin:0 auto;padding:24px}h1{margin:0 0 4px}.sub{color:#667085;margin-bottom:16px}nav{display:flex;gap:8px;margin-bottom:20px}nav a{padding:8px 12px;border:1px solid #cfd5dc;border-radius:7px;background:white;color:#344054;text-decoration:none;font-weight:600}nav a.active{background:#344054;color:white}.card{background:white;border:1px solid #d9dee5;border-radius:10px;padding:18px;margin-bottom:16px}.control-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}button{padding:10px 14px;font-weight:600;cursor:pointer}button:disabled{cursor:wait;opacity:.65}.note{color:#667085;font-size:13px;margin-top:8px}#status{color:#667085;font-size:13px}</style></head>
-<body><main><h1>UPSflow</h1><div class="sub">Local EcoFlow DC controls and test operations</div><nav><a href="/">Monitor</a><a class="active" href="/controls">Controls / Test</a></nav><div id="devices"></div><div id="status">Loading…</div>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>UPSflow Controls</title>
+<style>
+body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f4f6;color:#17202a}main{max-width:900px;margin:0 auto;padding:24px}
+h1{margin:0 0 4px}.sub{color:#667085;margin-bottom:16px}nav{display:flex;gap:8px;margin-bottom:20px}
+nav a{padding:8px 12px;border:1px solid #cfd5dc;border-radius:7px;background:white;color:#344054;text-decoration:none;font-weight:600}nav a.active{background:#344054;color:white}
+.card{background:white;border:1px solid #d9dee5;border-radius:10px;padding:18px;margin-bottom:16px;box-shadow:0 1px 2px #0001}
+.control{border-top:1px solid #eee;padding:14px 0}.control:first-child{border-top:0;padding-top:0}
+.control h3{margin:0 0 6px}.control p{margin:0 0 10px;color:#667085;font-size:13px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.state{margin-left:auto;color:#667085;font-size:13px}
+button,input,select{font:inherit}button{padding:9px 13px;font-weight:600;cursor:pointer}button:disabled{cursor:wait;opacity:.65}
+input,select{padding:8px;border:1px solid #cfd5dc;border-radius:6px}.note{color:#667085;font-size:13px;margin-top:8px}
+#status{color:#667085;font-size:13px}.error{color:#b42318}.ok{color:#067647}
+</style></head><body><main><h1>UPSflow</h1><div class="sub">EcoFlow River 2 controls</div>
+<nav><a href="/">Monitor</a><a class="active" href="/controls">Controls</a></nav><div id="devices"></div><div id="status">Loading…</div>
 <script>
 const esc=s=>String(s??"—");
-function render(devices){document.getElementById("devices").innerHTML=Object.entries(devices||{}).map(([key,d])=>{const state=d.dc_12v_port_on==null?"UNKNOWN":d.dc_12v_port_on?"ON":"OFF";return '<section class="card"><h2>'+esc(key).toUpperCase()+'</h2><div>12V DC state: <strong>'+state+'</strong></div><div class="control-grid" style="margin-top:14px"><button onclick="setDc(\''+esc(key)+'\',true)">Turn DC ON</button><button onclick="setDc(\''+esc(key)+'\',false)">Turn DC OFF</button><button onclick="resetDc(\''+esc(key)+'\')">Reset DC (5s)</button></div><div class="note">These controls write to the EcoFlow unit. Use this page for testing; the Monitor page is telemetry-only.</div></section>}).join("")}
+const controls=[
+ ["ac","AC output","Turn the AC inverter/output on or off."],
+ ["dc","12V DC output","Turn the 12V DC output on or off."],
+ ["xboost","X-Boost","Enable or disable AC X-Boost."],
+ ["ac_always_on","AC always-on","Set the AC output always-on mode."],
+ ["energy_backup","Energy backup","Enable or disable Energy Backup mode."],
+ ["backup_reserve","Energy Backup reserve","Set the Energy Backup battery reserve percentage."],
+ ["charge_min","Minimum discharge limit","Set the minimum battery discharge limit percentage (0–30%)."],
+ ["charge_max","Maximum charge limit","Set the maximum battery charge limit percentage."],
+ ["dc_amps","DC charging max amps","Set the maximum DC charging current (0–8 A)."],
+ ["dc_mode","DC mode","Select AUTO, SOLAR, or CAR charging mode."],
+ ["ac_charge_watts","AC charging power","Set AC charging power (100–940 W)."]
+];
+function controlHtml(key,name,desc,control,d){
+ if(["ac","dc","xboost","ac_always_on","energy_backup"].includes(control)){
+   const current=control==="dc"?d.dc_12v_port_on:null;
+   return '<div class="control"><h3>'+name+'</h3><p>'+desc+'</p><div class="row"><button onclick="setControl(\''+esc(key)+'\',\''+control+'\',true)">ON</button><button onclick="setControl(\''+esc(key)+'\',\''+control+'\',false)">OFF</button><span class="state">Current: '+(current==null?"—":current?"ON":"OFF")+'</span></div></div>';
+ }
+ if(control==="dc_mode"){
+   const current=(d.raw_telemetry&&d.raw_telemetry.dc_mode)||d.dc_state||"UNKNOWN";
+   return '<div class="control"><h3>'+name+'</h3><p>'+desc+'</p><div class="row"><select id="'+control+'-'+key+'"><option>AUTO</option><option>SOLAR</option><option>CAR</option></select><button onclick="setControl(\''+esc(key)+'\',\''+control+'\',document.getElementById(\''+control+'-'+key+'\').value)">Set</button><span class="state">Current: '+esc(current)+'</span></div></div>';
+ }
+ const values={backup_reserve:d.raw_telemetry?.energy_backup_battery_level,charge_min:d.raw_telemetry?.battery_charge_limit_min,charge_max:d.raw_telemetry?.battery_charge_limit_max,dc_amps:d.raw_telemetry?.dc_charging_max_amps,ac_charge_watts:d.raw_telemetry?.ac_charging_speed};
+ const step=control==="dc_amps"?"0.5":"1";
+ const min=control==="charge_min"?"0":control==="dc_amps"?"0":control==="ac_charge_watts"?"100":"0";
+ const max=control==="charge_min"?"30":control==="dc_amps"?"8":control==="ac_charge_watts"?"940":"100";
+ const unit=control==="dc_amps"?" A":control==="ac_charge_watts"?" W":"%";
+ return '<div class="control"><h3>'+name+'</h3><p>'+desc+'</p><div class="row"><input id="'+control+'-'+key+'" type="number" min="'+min+'" max="'+max+'" step="'+step+'" value="'+(values[control]??"")+'"><span>'+unit+'</span><button onclick="setControl(\''+esc(key)+'\',\''+control+'\',document.getElementById(\''+control+'-'+key+'\').value)">Set</button><span class="state">Current: '+(values[control]??"—")+unit+'</span></div></div>';
+}
+function render(devices){document.getElementById("devices").innerHTML=Object.entries(devices||{}).map(([key,d])=>'<section class="card"><h2>'+esc(key).toUpperCase()+'</h2>'+controls.map(([c,n,desc])=>controlHtml(key,n,desc,c,d)).join("")+'<div class="note">Controls are sent directly to the River 2 over the existing authenticated BLE connection.</div></section>').join("")}
 async function load(){try{const r=await fetch("/v1/telemetry",{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);const p=await r.json();render(p.devices);document.getElementById("status").textContent="Telemetry loaded "+new Date().toLocaleTimeString()}catch(e){document.getElementById("status").textContent="Telemetry unavailable: "+e}}
-async function post(path,body){const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:body?JSON.stringify(body):undefined});const p=await r.json();if(!r.ok)throw new Error(p.detail||("HTTP "+r.status));return p}
-async function setDc(key,enabled){try{document.getElementById("status").textContent="Sending DC "+(enabled?"ON":"OFF")+" to "+key.toUpperCase()+"…";await post("/v1/devices/"+encodeURIComponent(key)+"/dc",{enabled});document.getElementById("status").textContent="DC command sent; waiting for telemetry…";setTimeout(load,500)}catch(e){document.getElementById("status").textContent="DC control failed: "+e}}
-async function resetDc(key){try{document.getElementById("status").textContent="Running 5-second DC reset on "+key.toUpperCase()+"…";await post("/v1/devices/"+encodeURIComponent(key)+"/dc/reset");document.getElementById("status").textContent="DC reset completed and verified.";setTimeout(load,500)}catch(e){document.getElementById("status").textContent="DC reset failed: "+e}}
+async function postControl(key,control,value){const r=await fetch("/v1/devices/"+encodeURIComponent(key)+"/control",{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify({control,value})});const p=await r.json();if(!r.ok)throw new Error(p.detail||("HTTP "+r.status));return p}
+async function setControl(key,control,value){document.getElementById("status").textContent="Sending "+control+" to "+key.toUpperCase()+"…";try{await postControl(key,control,value);document.getElementById("status").textContent=control+" command sent; waiting for telemetry…";setTimeout(load,500)}catch(e){document.getElementById("status").textContent="Control failed: "+e}}
 load();
 </script></main></body></html>"""
 
@@ -511,6 +607,40 @@ async def handle_http_client(
             await http_response(writer, 200, DASHBOARD_HTML, "text/html")
         elif method == "GET" and target == "/controls":
             await http_response(writer, 200, CONTROLS_HTML, "text/html")
+        elif method == "POST" and target.startswith("/v1/devices/") and target.endswith("/control"):
+            key = target[len("/v1/devices/"):-len("/control")].strip("/")
+            if not key:
+                await http_response(writer, 400, {"status": "error", "detail": "device key required"})
+                return
+            try:
+                content_length = int(headers.get("content-length", "0"))
+            except ValueError:
+                await http_response(writer, 400, {"status": "error", "detail": "invalid content-length"})
+                return
+            if content_length <= 0 or content_length > 2048:
+                await http_response(writer, 400, {"status": "error", "detail": "request body required"})
+                return
+            body = await asyncio.wait_for(reader.readexactly(content_length), timeout=2.0)
+            try:
+                payload = json.loads(body.decode("utf-8"))
+                control = str(payload["control"]).strip()
+                value = payload.get("value")
+                if not control:
+                    raise ValueError
+            except (ValueError, KeyError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+                await http_response(writer, 400, {"status": "error", "detail": "JSON body must contain 'control' and optional 'value'"})
+                return
+            try:
+                async with CONTROL_LOCK:
+                    result = await apply_control(states, key, control, value)
+                await http_response(writer, 200, result)
+            except KeyError as exc:
+                await http_response(writer, 404, {"status": "error", "detail": str(exc)})
+            except (ConnectionError, ValueError) as exc:
+                await http_response(writer, 409, {"status": "error", "detail": str(exc)})
+            except Exception as exc:
+                LOG.exception("Control %s failed for %s", control, key)
+                await http_response(writer, 500, {"status": "error", "detail": f"{type(exc).__name__}: {exc}"})
         elif method == "POST" and target.startswith("/v1/devices/") and target.endswith("/dc/reset"):
             key = target[len("/v1/devices/"):-len("/dc/reset")].strip("/")
             if not key:
