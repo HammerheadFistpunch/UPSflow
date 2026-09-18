@@ -388,101 +388,72 @@ def telemetry_snapshot(
 
 
 DASHBOARD_HTML = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>UPSflow</title>
 <style>
-body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f4f6;color:#17202a}
-main{max-width:900px;margin:0 auto;padding:24px}
-h1{margin:0 0 4px} .sub{color:#667085;margin-bottom:20px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
-.card{background:white;border:1px solid #d9dee5;border-radius:10px;padding:18px;box-shadow:0 1px 2px #0001}
-h2{margin:0 0 14px}.row{display:flex;justify-content:space-between;border-top:1px solid #eee;padding:8px 0}
-.label{color:#667085}.value{font-variant-numeric:tabular-nums}
+body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f4f6;color:#17202a}main{max-width:1100px;margin:0 auto;padding:24px}
+h1{margin:0 0 4px}.sub{color:#667085;margin-bottom:16px}nav{display:flex;gap:8px;margin-bottom:20px}
+nav a{padding:8px 12px;border:1px solid #cfd5dc;border-radius:7px;background:white;color:#344054;text-decoration:none;font-weight:600}nav a.active{background:#344054;color:white}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px}.card{background:white;border:1px solid #d9dee5;border-radius:10px;padding:18px;box-shadow:0 1px 2px #0001}
+h2{margin:0 0 14px}.row{display:flex;justify-content:space-between;gap:16px;border-top:1px solid #eee;padding:8px 0}.label{color:#667085}.value{font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere}
 .error{color:#b42318}.ok{color:#067647}.stale{color:#b54708}.positive{color:#067647}.negative{color:#b42318}
-.control{margin:0 0 12px}.control button{width:100%;padding:9px 12px;font-weight:600;cursor:pointer}
-.control button:disabled{cursor:wait;opacity:.65}
+details{margin-top:14px;border-top:1px solid #eee;padding-top:10px}summary{cursor:pointer;color:#344054;font-weight:600}.raw{margin-top:8px}.raw .row{font-size:13px}
 footer{margin-top:18px;color:#667085;font-size:13px}
-</style>
-</head>
-<body>
-<main>
-<h1>UPSflow</h1>
-<div class="sub">EcoFlow River 2 telemetry and local DC control</div>
-<div id="grid" class="grid"></div>
-<footer id="status">Loading…</footer>
-</main>
-<script>
-const esc = s => String(s ?? "—");
+</style></head><body><main>
+<h1>UPSflow</h1><div class="sub">EcoFlow River 2 telemetry and local monitoring</div>
+<nav><a class="active" href="/">Monitor</a><a href="/controls">Controls / Test</a></nav>
+<div id="grid" class="grid"></div><footer id="status">Loading…</footer>
+</main><script>
+const esc=s=>String(s??"—");
+const rawLabels={battery_level:"Battery level",input_power:"Total input power",output_power:"Total output power",cell_temperature:"Cell temperature",ac_input_power:"AC input power",ac_output_power:"AC output power",ac_input_voltage:"AC input voltage",ac_input_current:"AC input current",ac_ports:"AC ports",ac_xboost:"AC X-Boost",ac_charging_speed:"AC charging speed",ac_charging_power_min:"AC charging power min",ac_charging_power_max:"AC charging power max",dc_port_input_power:"DC input power",solar_input_power:"Solar input power",car_input_power:"Car input power",dc_mode:"DC mode",dc_12v_port:"12V DC port",dc12v_output_power:"12V output power",dc_charging_max_amps:"DC charging max amps",dc_charging_current_max:"DC charging current max",usbc_output_power:"USB-C output power",usba_output_power:"USB-A output power",energy_backup:"Energy backup",energy_backup_battery_level:"Energy backup battery level",battery_charge_limit_min:"Battery charge limit min",battery_charge_limit_max:"Battery charge limit max",remaining_time_charging:"Remaining charging time",remaining_time_discharging:"Remaining discharging time"};
+function rawValue(name,v){if(v==null)return"—";if(typeof v==="number"){if(name.includes("temperature")||name.includes("voltage")||name.includes("current")||name.includes("amps"))return v.toFixed(2);if(name.includes("power"))return Math.round(v)+" W";if(name==="battery_level")return Number(v).toFixed(1)+"%";return String(v)}if(typeof v==="object")return JSON.stringify(v);return String(v)}
+function rawRows(d){return Object.entries(d.raw_telemetry||{}).map(([n,v])=>'<div class="row"><span class="label">'+esc(rawLabels[n]||n)+'</span><span class="value">'+esc(rawValue(n,v))+'</span></div>').join("")}
 function card(key,d){
-  const connected = d.connected ? '<span class="ok">Connected</span>' : '<span>Disconnected</span>';
-  const ac = d.ac_present ? '<span class="ok">YES</span>' : '<span>NO</span>';
-  const net = Number(d.net_watts||0);
-  const netClass = net >= 0 ? 'positive' : 'negative';
-  const age = d.stale ? '<span class="stale">STALE</span>' :
-    d.telemetry_age_seconds == null ? 'Never' : Math.round(d.telemetry_age_seconds)+'s ago';
-  const err = d.error ? '<div class="row"><span class="label">Error</span><span class="value error">'+esc(d.error)+'</span></div>' : '';
-  const dcOn = Boolean(d.dc_12v_port_on);
-  const dcButton = d.connected
-    ? '<div class="control"><button id="dc-'+esc(key)+'" onclick="toggleDc(\\''+esc(key)+'\\', '+(!dcOn)+')">'+(dcOn ? 'Turn DC OFF' : 'Turn DC ON')+'</button></div>'
-    : '';
-  return '<section class="card"><h2>'+esc(key).toUpperCase()+'</h2>'+dcButton+
-    '<div class="row"><span class="label">BLE</span><span class="value">'+connected+'</span></div>'+
-    '<div class="row"><span class="label">Battery</span><span class="value">'+Number(d.battery_percent||0).toFixed(1)+'%</span></div>'+
-    '<div class="row"><span class="label">AC input</span><span class="value">'+ac+'</span></div>'+
-    '<div class="row"><span class="label">AC In</span><span class="value">'+Math.round(d.ac_watts||0)+' W</span></div>'+
-    '<div class="row"><span class="label">DC In</span><span class="value">'+Math.round(d.dc_in_watts||0)+' W</span></div>'+
-    '<div class="row"><span class="label">DC State</span><span class="value">'+esc(d.dc_state)+'</span></div>'+
-    '<div class="row"><span class="label">Total Input</span><span class="value">'+Math.round(d.total_input_watts||0)+' W</span></div>'+
-    '<div class="row"><span class="label">12V out</span><span class="value">'+Math.round(d.dc12v_output_watts||0)+' W</span></div>'+
-    '<div class="row"><span class="label">USB out</span><span class="value">'+Math.round(d.usb_output_watts||0)+' W</span></div>'+
-    '<div class="row"><span class="label">Total Output</span><span class="value">'+Math.round(d.output_watts||0)+' W</span></div>'+
-    '<div class="row"><span class="label">Net power</span><span class="value '+netClass+'">'+(net >= 0 ? '+' : '')+Math.round(net)+' W</span></div>'+
-    '<div class="row"><span class="label">Telemetry</span><span class="value">'+age+'</span></div>'+err+
-    '</section>';
+ const connected=d.connected?'<span class="ok">Connected</span>':'<span>Disconnected</span>',ac=d.ac_present?'<span class="ok">YES</span>':'<span>NO</span>',net=Number(d.net_watts||0),nc=net>=0?"positive":"negative";
+ const age=d.stale?'<span class="stale">STALE</span>':d.telemetry_age_seconds==null?"Never":Math.round(d.telemetry_age_seconds)+"s ago";
+ const err=d.error?'<div class="row"><span class="label">Error</span><span class="value error">'+esc(d.error)+'</span></div>':"";
+ return '<section class="card"><h2>'+esc(key).toUpperCase()+'</h2>'+
+ '<div class="row"><span class="label">BLE</span><span class="value">'+connected+'</span></div>'+
+ '<div class="row"><span class="label">Battery</span><span class="value">'+Number(d.battery_percent||0).toFixed(1)+'%</span></div>'+
+ '<div class="row"><span class="label">AC input</span><span class="value">'+ac+'</span></div>'+
+ '<div class="row"><span class="label">AC In</span><span class="value">'+Math.round(d.ac_watts||0)+' W</span></div>'+
+ '<div class="row"><span class="label">DC In</span><span class="value">'+Math.round(d.dc_in_watts||0)+' W</span></div>'+
+ '<div class="row"><span class="label">DC State</span><span class="value">'+esc(d.dc_state)+'</span></div>'+
+ '<div class="row"><span class="label">Total Input</span><span class="value">'+Math.round(d.total_input_watts||0)+' W</span></div>'+
+ '<div class="row"><span class="label">12V out</span><span class="value">'+Math.round(d.dc12v_output_watts||0)+' W</span></div>'+
+ '<div class="row"><span class="label">USB out</span><span class="value">'+Math.round(d.usb_output_watts||0)+' W</span></div>'+
+ '<div class="row"><span class="label">Total Output</span><span class="value">'+Math.round(d.output_watts||0)+' W</span></div>'+
+ '<div class="row"><span class="label">Net power</span><span class="value '+nc+'">'+(net>=0?"+":"")+Math.round(net)+' W</span></div>'+
+ '<div class="row"><span class="label">Telemetry</span><span class="value">'+age+'</span></div>'+err+
+ '<details><summary>Show more</summary><div class="raw">'+
+ '<div class="row"><span class="label">Name</span><span class="value">'+esc(d.name)+'</span></div>'+
+ '<div class="row"><span class="label">Serial number</span><span class="value">'+esc(d.serial_number)+'</span></div>'+
+ '<div class="row"><span class="label">BLE address</span><span class="value">'+esc(d.address)+'</span></div>'+
+ '<div class="row"><span class="label">Derived AC voltage</span><span class="value">'+Number(d.ac_voltage||0).toFixed(1)+' V</span></div>'+
+ '<div class="row"><span class="label">Derived AC input present</span><span class="value">'+ac+'</span></div>'+
+ '<div class="row"><span class="label">Derived AC output</span><span class="value">'+Math.round(d.ac_output_watts||0)+' W</span></div>'+
+ '<div class="row"><span class="label">Derived DC state</span><span class="value">'+esc(d.dc_12v_port_on==null?"UNKNOWN":d.dc_12v_port_on?"ON":"OFF")+'</span></div>'+
+ '<div class="row"><span class="label">Telemetry age</span><span class="value">'+esc(d.telemetry_age_seconds==null?"Never":Number(d.telemetry_age_seconds).toFixed(1)+" s")+'</span></div>'+
+ '<div class="row"><span class="label">Stale</span><span class="value">'+(d.stale?"YES":"NO")+'</span></div>'+rawRows(d)+'</div></details></section>';
 }
-async function toggleDc(key, enabled){
-  const button = document.getElementById('dc-'+key);
-  if(button) button.disabled = true;
-  try{
-    const r=await fetch('/v1/devices/'+encodeURIComponent(key)+'/dc',{
-      method:'POST',
-      headers:{'Content-Type':'application/json','Accept':'application/json'},
-      body:JSON.stringify({enabled})
-    });
-    const p=await r.json();
-    if(!r.ok) throw new Error(p.detail || ('HTTP '+r.status));
-    document.getElementById('status').textContent='DC command sent to '+key.toUpperCase()+'; waiting for telemetry confirmation…';
-    setTimeout(refresh, 500);
-  }catch(e){
-    document.getElementById('status').textContent='DC control failed: '+e;
-    if(button) button.disabled = false;
-  }
-}
+async function refresh(){try{const r=await fetch("/v1/telemetry",{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);const p=await r.json();document.getElementById("grid").innerHTML=Object.entries(p.devices||{}).map(([k,d])=>card(k,d)).join("");const s=Number(p.poll_seconds)>0?Number(p.poll_seconds):2;document.getElementById("status").textContent="Updated "+new Date().toLocaleTimeString()+" · Monitor · Refresh "+s+"s";window.__upsflowPollMs=s*1000}catch(e){document.getElementById("status").textContent="Telemetry unavailable: "+e;window.__upsflowPollMs=window.__upsflowPollMs||2000}finally{setTimeout(refresh,window.__upsflowPollMs||2000)}}refresh();
+</script></body></html>"""
 
-async function refresh(){
-  try{
-    const r=await fetch('/v1/telemetry',{cache:'no-store'});
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const p=await r.json();
-    document.getElementById('grid').innerHTML=Object.entries(p.devices||{}).map(([k,d])=>card(k,d)).join('');
-    const seconds = Number(p.poll_seconds) > 0 ? Number(p.poll_seconds) : 2;
-    document.getElementById('status').textContent='Updated '+new Date().toLocaleTimeString()+' · Read-only · Configured refresh '+seconds+'s';
-    window.__upsflowPollMs = seconds * 1000;
-  }catch(e){
-    document.getElementById('status').textContent='Telemetry unavailable: '+e;
-    window.__upsflowPollMs = window.__upsflowPollMs || 2000;
-  }finally{
-    setTimeout(refresh, window.__upsflowPollMs || 2000);
-  }
-}
-refresh();
-</script>
-</body>
-</html>
-"""
+CONTROLS_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>UPSflow Controls / Test</title>
+<style>body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f4f6;color:#17202a}main{max-width:800px;margin:0 auto;padding:24px}h1{margin:0 0 4px}.sub{color:#667085;margin-bottom:16px}nav{display:flex;gap:8px;margin-bottom:20px}nav a{padding:8px 12px;border:1px solid #cfd5dc;border-radius:7px;background:white;color:#344054;text-decoration:none;font-weight:600}nav a.active{background:#344054;color:white}.card{background:white;border:1px solid #d9dee5;border-radius:10px;padding:18px;margin-bottom:16px}.control-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}button{padding:10px 14px;font-weight:600;cursor:pointer}button:disabled{cursor:wait;opacity:.65}.note{color:#667085;font-size:13px;margin-top:8px}#status{color:#667085;font-size:13px}</style></head>
+<body><main><h1>UPSflow</h1><div class="sub">Local EcoFlow DC controls and test operations</div><nav><a href="/">Monitor</a><a class="active" href="/controls">Controls / Test</a></nav><div id="devices"></div><div id="status">Loading…</div>
+<script>
+const esc=s=>String(s??"—");
+function render(devices){document.getElementById("devices").innerHTML=Object.entries(devices||{}).map(([key,d])=>{const state=d.dc_12v_port_on==null?"UNKNOWN":d.dc_12v_port_on?"ON":"OFF";return '<section class="card"><h2>'+esc(key).toUpperCase()+'</h2><div>12V DC state: <strong>'+state+'</strong></div><div class="control-grid" style="margin-top:14px"><button onclick="setDc(\''+esc(key)+'\',true)">Turn DC ON</button><button onclick="setDc(\''+esc(key)+'\',false)">Turn DC OFF</button><button onclick="resetDc(\''+esc(key)+'\')">Reset DC (5s)</button></div><div class="note">These controls write to the EcoFlow unit. Use this page for testing; the Monitor page is telemetry-only.</div></section>}).join("")}
+async function load(){try{const r=await fetch("/v1/telemetry",{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);const p=await r.json();render(p.devices);document.getElementById("status").textContent="Telemetry loaded "+new Date().toLocaleTimeString()}catch(e){document.getElementById("status").textContent="Telemetry unavailable: "+e}}
+async function post(path,body){const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:body?JSON.stringify(body):undefined});const p=await r.json();if(!r.ok)throw new Error(p.detail||("HTTP "+r.status));return p}
+async function setDc(key,enabled){try{document.getElementById("status").textContent="Sending DC "+(enabled?"ON":"OFF")+" to "+key.toUpperCase()+"…";await post("/v1/devices/"+encodeURIComponent(key)+"/dc",{enabled});document.getElementById("status").textContent="DC command sent; waiting for telemetry…";setTimeout(load,500)}catch(e){document.getElementById("status").textContent="DC control failed: "+e}}
+async function resetDc(key){try{document.getElementById("status").textContent="Running 5-second DC reset on "+key.toUpperCase()+"…";await post("/v1/devices/"+encodeURIComponent(key)+"/dc/reset");document.getElementById("status").textContent="DC reset completed and verified.";setTimeout(load,500)}catch(e){document.getElementById("status").textContent="DC reset failed: "+e}}
+load();
+</script></main></body></html>"""
+
 
 
 async def http_response(
