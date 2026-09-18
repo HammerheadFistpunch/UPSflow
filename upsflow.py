@@ -513,42 +513,184 @@ input,select{padding:8px;border:1px solid #cfd5dc;border-radius:6px}.note{color:
 </style></head><body><main><h1>UPSflow</h1><div class="sub">EcoFlow River 2 controls</div>
 <nav><a href="/">Monitor</a><a class="active" href="/controls">Controls</a></nav><div id="devices"></div><div id="status">Loading…</div>
 <script>
-const esc=s=>String(s??"—");
-const controls=[
- ["ac","AC output","Turn the AC inverter/output on or off."],
- ["dc","12V DC output","Turn the 12V DC output on or off."],
- ["xboost","X-Boost","Enable or disable AC X-Boost."],
- ["ac_always_on","AC always-on","Set the AC output always-on mode."],
- ["energy_backup","Energy backup","Enable or disable Energy Backup mode."],
- ["backup_reserve","Energy Backup reserve","Set the Energy Backup battery reserve percentage."],
- ["charge_min","Minimum discharge limit","Set the minimum battery discharge limit percentage (0–30%)."],
- ["charge_max","Maximum charge limit","Set the maximum battery charge limit percentage."],
- ["dc_amps","DC charging max amps","Set the maximum DC charging current (0–8 A)."],
- ["dc_mode","DC mode","Select AUTO, SOLAR, or CAR charging mode."],
- ["ac_charge_watts","AC charging power","Set AC charging power (100–940 W)."]
+const esc = (s) => String(s == null ? "—" : s);
+const controls = [
+  ["ac","AC output","Turn the AC inverter/output on or off.","toggle"],
+  ["dc","12V DC output","Turn the 12V DC output on or off.","toggle"],
+  ["xboost","X-Boost","Enable or disable AC X-Boost.","toggle"],
+  ["ac_always_on","AC always-on","Set the AC output always-on mode.","toggle"],
+  ["energy_backup","Energy backup","Enable or disable Energy Backup mode.","toggle"],
+  ["backup_reserve","Energy Backup reserve","Set the Energy Backup battery reserve percentage.","number"],
+  ["charge_min","Minimum discharge limit","Set the minimum battery discharge limit percentage (0–30%).","number"],
+  ["charge_max","Maximum charge limit","Set the maximum battery charge limit percentage.","number"],
+  ["dc_amps","DC charging max amps","Set the maximum DC charging current (0–8 A).","number"],
+  ["dc_mode","DC mode","Select AUTO, SOLAR, or CAR charging mode.","mode"],
+  ["ac_charge_watts","AC charging power","Set AC charging power (100–940 W).","number"]
 ];
-function controlHtml(key,name,desc,control,d){
- if(["ac","dc","xboost","ac_always_on","energy_backup"].includes(control)){
-   const current=control==="dc"?d.dc_12v_port_on:null;
-   return '<div class="control"><h3>'+name+'</h3><p>'+desc+'</p><div class="row"><button onclick="setControl(\''+esc(key)+'\',\''+control+'\',true)">ON</button><button onclick="setControl(\''+esc(key)+'\',\''+control+'\',false)">OFF</button><span class="state">Current: '+(current==null?"—":current?"ON":"OFF")+'</span></div></div>';
- }
- if(control==="dc_mode"){
-   const current=(d.raw_telemetry&&d.raw_telemetry.dc_mode)||d.dc_state||"UNKNOWN";
-   return '<div class="control"><h3>'+name+'</h3><p>'+desc+'</p><div class="row"><select id="'+control+'-'+key+'"><option>AUTO</option><option>SOLAR</option><option>CAR</option></select><button onclick="setControl(\''+esc(key)+'\',\''+control+'\',document.getElementById(\''+control+'-'+key+'\').value)">Set</button><span class="state">Current: '+esc(current)+'</span></div></div>';
- }
- const values={backup_reserve:d.raw_telemetry?.energy_backup_battery_level,charge_min:d.raw_telemetry?.battery_charge_limit_min,charge_max:d.raw_telemetry?.battery_charge_limit_max,dc_amps:d.raw_telemetry?.dc_charging_max_amps,ac_charge_watts:d.raw_telemetry?.ac_charging_speed};
- const step=control==="dc_amps"?"0.5":"1";
- const min=control==="charge_min"?"0":control==="dc_amps"?"0":control==="ac_charge_watts"?"100":"0";
- const max=control==="charge_min"?"30":control==="dc_amps"?"8":control==="ac_charge_watts"?"940":"100";
- const unit=control==="dc_amps"?" A":control==="ac_charge_watts"?" W":"%";
- return '<div class="control"><h3>'+name+'</h3><p>'+desc+'</p><div class="row"><input id="'+control+'-'+key+'" type="number" min="'+min+'" max="'+max+'" step="'+step+'" value="'+(values[control]??"")+'"><span>'+unit+'</span><button onclick="setControl(\''+esc(key)+'\',\''+control+'\',document.getElementById(\''+control+'-'+key+'\').value)">Set</button><span class="state">Current: '+(values[control]??"—")+unit+'</span></div></div>';
+
+function raw(d, name) {
+  return d && d.raw_telemetry ? d.raw_telemetry[name] : null;
 }
-function render(devices){document.getElementById("devices").innerHTML=Object.entries(devices||{}).map(([key,d])=>'<section class="card"><h2>'+esc(key).toUpperCase()+'</h2>'+controls.map(([c,n,desc])=>controlHtml(key,n,desc,c,d)).join("")+'<div class="note">Controls are sent directly to the River 2 over the existing authenticated BLE connection.</div></section>').join("")}
-async function load(){try{const r=await fetch("/v1/telemetry",{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);const p=await r.json();render(p.devices);document.getElementById("status").textContent="Telemetry loaded "+new Date().toLocaleTimeString()}catch(e){document.getElementById("status").textContent="Telemetry unavailable: "+e}}
-async function postControl(key,control,value){const r=await fetch("/v1/devices/"+encodeURIComponent(key)+"/control",{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify({control,value})});const p=await r.json();if(!r.ok)throw new Error(p.detail||("HTTP "+r.status));return p}
-async function setControl(key,control,value){document.getElementById("status").textContent="Sending "+control+" to "+key.toUpperCase()+"…";try{await postControl(key,control,value);document.getElementById("status").textContent=control+" command sent; waiting for telemetry…";setTimeout(load,500)}catch(e){document.getElementById("status").textContent="Control failed: "+e}}
+
+function currentValue(d, control) {
+  if (control === "ac") return raw(d, "ac_ports");
+  if (control === "dc") return d.dc_12v_port_on;
+  if (control === "xboost") return raw(d, "ac_xboost");
+  if (control === "ac_always_on") return raw(d, "ac_always_on");
+  if (control === "energy_backup") return raw(d, "energy_backup");
+  if (control === "backup_reserve") return raw(d, "energy_backup_battery_level");
+  if (control === "charge_min") return raw(d, "battery_charge_limit_min");
+  if (control === "charge_max") return raw(d, "battery_charge_limit_max");
+  if (control === "dc_amps") return raw(d, "dc_charging_max_amps");
+  if (control === "dc_mode") return raw(d, "dc_mode") || d.dc_state;
+  if (control === "ac_charge_watts") return raw(d, "ac_charging_speed");
+  return null;
+}
+
+function displayCurrent(value, control) {
+  if (value == null || value === "") return "—";
+  if (typeof value === "boolean") return value ? "ON" : "OFF";
+  if (control === "dc_amps") return Number(value).toFixed(1) + " A";
+  if (control === "ac_charge_watts") return Math.round(Number(value)) + " W";
+  if (control === "backup_reserve" || control === "charge_min" || control === "charge_max") return Number(value).toFixed(0) + "%";
+  return esc(value);
+}
+
+function makeControl(key, d, control, name, desc, type) {
+  const wrap = document.createElement("div");
+  wrap.className = "control";
+
+  const h3 = document.createElement("h3");
+  h3.textContent = name;
+  wrap.appendChild(h3);
+
+  const p = document.createElement("p");
+  p.textContent = desc;
+  wrap.appendChild(p);
+
+  const row = document.createElement("div");
+  row.className = "row";
+
+  if (type === "toggle") {
+    const on = document.createElement("button");
+    on.textContent = "ON";
+    on.onclick = () => setControl(key, control, true);
+    const off = document.createElement("button");
+    off.textContent = "OFF";
+    off.onclick = () => setControl(key, control, false);
+    row.append(on, off);
+  } else if (type === "mode") {
+    const select = document.createElement("select");
+    ["AUTO","SOLAR","CAR"].forEach((mode) => {
+      const option = document.createElement("option");
+      option.value = mode;
+      option.textContent = mode;
+      select.appendChild(option);
+    });
+    const current = String(currentValue(d, control) || "AUTO").toUpperCase();
+    if (["AUTO","SOLAR","CAR"].includes(current)) select.value = current;
+    const set = document.createElement("button");
+    set.textContent = "Set";
+    set.onclick = () => setControl(key, control, select.value);
+    row.append(select, set);
+  } else {
+    const input = document.createElement("input");
+    input.type = "number";
+    input.id = "input-" + control + "-" + key;
+    if (control === "charge_min") { input.min = "0"; input.max = "30"; }
+    else if (control === "dc_amps") { input.min = "0"; input.max = "8"; input.step = "0.5"; }
+    else if (control === "ac_charge_watts") { input.min = "100"; input.max = "940"; input.step = "1"; }
+    else { input.min = "0"; input.max = "100"; input.step = "1"; }
+    const current = currentValue(d, control);
+    if (current != null && current !== "") input.value = current;
+
+    const unit = document.createElement("span");
+    unit.textContent = control === "dc_amps" ? "A" : control === "ac_charge_watts" ? "W" : "%";
+
+    const set = document.createElement("button");
+    set.textContent = "Set";
+    set.onclick = () => setControl(key, control, input.value);
+    row.append(input, unit, set);
+  }
+
+  const state = document.createElement("span");
+  state.className = "state";
+  state.textContent = "Current: " + displayCurrent(currentValue(d, control), control);
+  row.appendChild(state);
+  wrap.appendChild(row);
+  return wrap;
+}
+
+function render(devices) {
+  const root = document.getElementById("devices");
+  root.innerHTML = "";
+  Object.entries(devices || {}).forEach(([key, d]) => {
+    const card = document.createElement("section");
+    card.className = "card";
+
+    const h2 = document.createElement("h2");
+    h2.textContent = key.toUpperCase();
+    card.appendChild(h2);
+
+    controls.forEach(([control,name,desc,type]) => {
+      card.appendChild(makeControl(key, d, control, name, desc, type));
+    });
+
+    const note = document.createElement("div");
+    note.className = "note";
+    note.textContent = "Controls are sent directly to the River 2 over the existing authenticated BLE connection.";
+    card.appendChild(note);
+    root.appendChild(card);
+  });
+}
+
+async function load() {
+  const status = document.getElementById("status");
+  status.textContent = "Loading telemetry…";
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const response = await fetch("/v1/telemetry", {cache:"no-store", signal:controller.signal});
+    clearTimeout(timer);
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const payload = await response.json();
+    render(payload.devices);
+    status.textContent = "Telemetry loaded " + new Date().toLocaleTimeString();
+  } catch (error) {
+    status.className = "error";
+    status.textContent = "Telemetry unavailable: " + (error && error.message ? error.message : error);
+  }
+}
+
+async function postControl(key, control, value) {
+  const response = await fetch("/v1/devices/" + encodeURIComponent(key) + "/control", {
+    method:"POST",
+    headers:{"Content-Type":"application/json","Accept":"application/json"},
+    body:JSON.stringify({control:control,value:value})
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.detail || ("HTTP " + response.status));
+  return payload;
+}
+
+async function setControl(key, control, value) {
+  const status = document.getElementById("status");
+  status.className = "";
+  status.textContent = "Sending " + control + " to " + key.toUpperCase() + "…";
+  try {
+    await postControl(key, control, value);
+    status.className = "ok";
+    status.textContent = control + " command sent; waiting for telemetry…";
+    setTimeout(load, 500);
+  } catch (error) {
+    status.className = "error";
+    status.textContent = "Control failed: " + (error && error.message ? error.message : error);
+  }
+}
+
 load();
 </script></main></body></html>"""
+
 
 
 
