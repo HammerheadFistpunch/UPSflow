@@ -1,0 +1,41 @@
+Here's every telemetry attribute available on your `UPSFlowRiver2` device objects (via `getattr(device, name)`), pulled from the pinned eflib source plus your own overrides:
+
+**Battery / power flow**
+- `battery_level` — % state of charge
+- `input_power` — total input watts (all sources combined)
+- `output_power` — total output watts
+- `cell_temperature`
+
+**AC**
+- `ac_input_power` — AC watts in
+- `ac_output_power` — AC watts out
+- `ac_input_voltage` — your override, scaled voltage
+- `ac_input_current` — your override, scaled current
+- `ac_ports` — bool, AC outlets enabled
+- `ac_xboost` — bool, X-Boost enabled
+- `ac_charging_speed` / `ac_charging_power_min` / `ac_charging_power_max`
+
+**DC / Solar**
+- `dc_port_input_power` — raw XT60 port watts (not mode-gated)
+- `solar_input_power` — derived, only nonzero when `dc_mode == SOLAR`
+- `car_input_power` — derived, only nonzero when `dc_mode == CAR`
+- `dc_mode` — current `DCMode` (AUTO/SOLAR/CAR/UNKNOWN)
+- `dc_12v_port` — bool, 12V port enabled
+- `dc12v_output_power`
+- `dc_charging_max_amps` / `dc_charging_current_max`
+
+**USB outputs**
+- `usbc_output_power`
+- `usba_output_power`
+
+**Energy backup / limits**
+- `energy_backup` — bool
+- `energy_backup_battery_level`
+- `battery_charge_limit_min` / `battery_charge_limit_max`
+- `remaining_time_charging` / `remaining_time_discharging`
+
+**Connection/identity (from `DeviceBase`, used elsewhere in your script)**
+- `is_connected`
+- `name`, `serial_number`, `address`
+
+Your `telemetry_device()`/`format_device()` functions in `upsflow.py` currently only surface a handful of these (battery, AC, solar, totals, output) — anything else here you can pull the same way with `value(d, "field_name")`.
