@@ -56,7 +56,7 @@ class UPSflowGUI(tk.Tk):
         ttk.Label(outer, textvariable=self.api_var).pack(anchor="w")
         ttk.Label(outer, textvariable=self.read_only_var).pack(anchor="w", pady=(2, 10))
 
-        for key, title in (("network", "NETWORK"), ("server", "SERVER")):
+        for key, title in (("server", "SERVER"), ("network", "NETWORK")):
             self._add_device_card(outer, key, title)
 
         log_frame = ttk.LabelFrame(outer, text="Status log", padding=6)
