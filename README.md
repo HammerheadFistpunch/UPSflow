@@ -89,19 +89,21 @@ Run the monitor directly for testing:
 python upsflow.py monitor
 ```
 
-## Local GUI
+## Local Web GUI
 
-UPSflow includes a basic Windows GUI that reads the same local HTTP API used by Keymaster. It does **not** create a second BLE connection.
+UPSflow serves a basic read-only dashboard from the same HTTP server used by Keymaster. No second BLE connection or separate web service is required.
 
-Run it with:
+Open this in a browser on the Windows host:
 
-```powershell
-python upsflow_gui.py
+```text
+http://localhost:5005/
 ```
 
-The GUI displays both UPS units, BLE state, battery, AC presence/voltage/power, solar, total input, output, telemetry age, and errors. Closing the GUI does not stop UPSflow telemetry.
+The dashboard shows both UPS units, BLE state, battery, AC presence/voltage/power, solar, total input, output, telemetry age, and errors. It refreshes automatically every 2 seconds.
 
-The GUI reads `http_host` and `http_port` from `config.json`. If the service binds to `0.0.0.0`, the GUI automatically connects to `127.0.0.1`.
+The existing endpoints remain available at `/health` and `/v1/telemetry`.
+
+The older Tkinter desktop viewer can still be run with `python upsflow_gui.py`, but the browser dashboard is the recommended local display.
 
 ## Windows service with NSSM
 
