@@ -239,9 +239,25 @@ def json_value(raw: Any) -> Any:
     return str(raw)
 
 
+def dc_12v_state(device: UPSFlowRiver2) -> bool | None:
+    """Return the native 12V DC port state without conflating missing with OFF."""
+    raw = getattr(device, "dc_12v_port", None)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)) and raw in (0, 1):
+        return bool(raw)
+    raw_value = getattr(raw, "value", None)
+    if isinstance(raw_value, bool):
+        return raw_value
+    if isinstance(raw_value, (int, float)) and raw_value in (0, 1):
+        return bool(raw_value)
+    return None
+
+
 def telemetry_device(state: DeviceState, stale_seconds: int) -> dict[str, Any]:
     d = state.device
     battery = float(value(d, "battery_level", 0))
+    dc_12v_on = dc_12v_state(d)
     ac_w = float(value(d, "ac_input_power", 0))
     ac_v = float(value(d, "ac_input_voltage", 0))
     ac_out_w = float(value(d, "ac_output_power", 0))
@@ -271,6 +287,8 @@ def telemetry_device(state: DeviceState, stale_seconds: int) -> dict[str, Any]:
         "ac_output_watts": ac_out_w,
         "dc_in_watts": dc_w,
         "dc_state": dc_mode,
+        "dc_12v_port_on": dc_12v_on,
+        "dc_enabled": dc_12v_on,
         "total_input_watts": total_in,
         "dc12v_output_watts": dc12_w,
         "usba_output_watts": usba_w,
@@ -285,12 +303,84 @@ def telemetry_device(state: DeviceState, stale_seconds: int) -> dict[str, Any]:
     }
 
 
+def find_device(states: list[DeviceState], key: str) -> DeviceState | None:
+    return next((state for state in states if state.key == key), None)
+
+
+async def control_dc_port(
+    states: list[DeviceState], key: str, enabled: bool
+) -> dict[str, Any]:
+    state = find_device(states, key)
+    if state is None:
+        raise KeyError(f"device not configured: {key}")
+    if not state.device.is_connected:
+        raise ConnectionError(f"{key} is not connected")
+    await state.device.enable_dc_12v_port(enabled)
+    return {
+        "status": "ok",
+        "device": key,
+        "control": "dc_12v_port",
+        "requested": enabled,
+    }
+
+
+async def wait_for_dc_state(
+    state: DeviceState, expected: bool, timeout_seconds: float = 10.0
+) -> bool:
+    """Wait for the device's native DC state to reflect an expected value."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        current = dc_12v_state(state.device)
+        if current is expected:
+            return True
+        await asyncio.sleep(0.25)
+    return False
+
+
+async def reset_dc_port(
+    states: list[DeviceState], key: str, delay_seconds: float = 5.0
+) -> dict[str, Any]:
+    """Reset DC: verify current state, force OFF, verify, wait, then force ON and verify."""
+    state = find_device(states, key)
+    if state is None:
+        raise KeyError(f"device not configured: {key}")
+    if not state.device.is_connected:
+        raise ConnectionError(f"{key} is not connected")
+    if state.stale:
+        raise ValueError(f"{key} DC telemetry is stale")
+
+    current = dc_12v_state(state.device)
+    if current is None:
+        raise ValueError(f"{key} DC state is unknown")
+
+    LOG.info("DC reset %s: initial state=%s", key, current)
+    await state.device.enable_dc_12v_port(False)
+    if not await wait_for_dc_state(state, False):
+        raise RuntimeError(f"{key} DC OFF state was not confirmed")
+
+    await asyncio.sleep(delay_seconds)
+
+    await state.device.enable_dc_12v_port(True)
+    if not await wait_for_dc_state(state, True):
+        raise RuntimeError(f"{key} DC ON state was not confirmed")
+
+    LOG.info("DC reset %s complete: initial=%s final=True", key, current)
+    return {
+        "status": "ok",
+        "device": key,
+        "control": "dc_12v_port_reset",
+        "initial_state": current,
+        "off_seconds": delay_seconds,
+        "final_state": True,
+    }
+
+
 def telemetry_snapshot(
     states: list[DeviceState], stale_seconds: int, poll_seconds: int
 ) -> dict[str, Any]:
     return {
         "service": "UPSflow",
-        "read_only": True,
+        "read_only": False,
         "poll_seconds": poll_seconds,
         "stale_seconds": stale_seconds,
         "devices": {state.key: telemetry_device(state, stale_seconds) for state in states},
@@ -312,13 +402,15 @@ h1{margin:0 0 4px} .sub{color:#667085;margin-bottom:20px}
 h2{margin:0 0 14px}.row{display:flex;justify-content:space-between;border-top:1px solid #eee;padding:8px 0}
 .label{color:#667085}.value{font-variant-numeric:tabular-nums}
 .error{color:#b42318}.ok{color:#067647}.stale{color:#b54708}.positive{color:#067647}.negative{color:#b42318}
+.control{margin:0 0 12px}.control button{width:100%;padding:9px 12px;font-weight:600;cursor:pointer}
+.control button:disabled{cursor:wait;opacity:.65}
 footer{margin-top:18px;color:#667085;font-size:13px}
 </style>
 </head>
 <body>
 <main>
 <h1>UPSflow</h1>
-<div class="sub">EcoFlow River 2 telemetry — read only</div>
+<div class="sub">EcoFlow River 2 telemetry and local DC control</div>
 <div id="grid" class="grid"></div>
 <footer id="status">Loading…</footer>
 </main>
@@ -332,7 +424,11 @@ function card(key,d){
   const age = d.stale ? '<span class="stale">STALE</span>' :
     d.telemetry_age_seconds == null ? 'Never' : Math.round(d.telemetry_age_seconds)+'s ago';
   const err = d.error ? '<div class="row"><span class="label">Error</span><span class="value error">'+esc(d.error)+'</span></div>' : '';
-  return '<section class="card"><h2>'+esc(key).toUpperCase()+'</h2>'+
+  const dcOn = Boolean(d.dc_12v_port_on);
+  const dcButton = d.connected
+    ? '<div class="control"><button id="dc-'+esc(key)+'" onclick="toggleDc(\\''+esc(key)+'\\', '+(!dcOn)+')">'+(dcOn ? 'Turn DC OFF' : 'Turn DC ON')+'</button></div>'
+    : '';
+  return '<section class="card"><h2>'+esc(key).toUpperCase()+'</h2>'+dcButton+
     '<div class="row"><span class="label">BLE</span><span class="value">'+connected+'</span></div>'+
     '<div class="row"><span class="label">Battery</span><span class="value">'+Number(d.battery_percent||0).toFixed(1)+'%</span></div>'+
     '<div class="row"><span class="label">AC input</span><span class="value">'+ac+'</span></div>'+
@@ -347,6 +443,25 @@ function card(key,d){
     '<div class="row"><span class="label">Telemetry</span><span class="value">'+age+'</span></div>'+err+
     '</section>';
 }
+async function toggleDc(key, enabled){
+  const button = document.getElementById('dc-'+key);
+  if(button) button.disabled = true;
+  try{
+    const r=await fetch('/v1/devices/'+encodeURIComponent(key)+'/dc',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Accept':'application/json'},
+      body:JSON.stringify({enabled})
+    });
+    const p=await r.json();
+    if(!r.ok) throw new Error(p.detail || ('HTTP '+r.status));
+    document.getElementById('status').textContent='DC command sent to '+key.toUpperCase()+'; waiting for telemetry confirmation…';
+    setTimeout(refresh, 500);
+  }catch(e){
+    document.getElementById('status').textContent='DC control failed: '+e;
+    if(button) button.disabled = false;
+  }
+}
+
 async function refresh(){
   try{
     const r=await fetch('/v1/telemetry',{cache:'no-store'});
@@ -380,7 +495,7 @@ async def http_response(
         body = payload.encode("utf-8")
     else:
         body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    reason = {200: "OK", 404: "Not Found", 405: "Method Not Allowed"}.get(status, "Error")
+    reason = {200: "OK", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed", 409: "Conflict", 500: "Internal Server Error"}.get(status, "Error")
     headers = (
         f"HTTP/1.1 {status} {reason}\r\n"
         f"Content-Type: {content_type}; charset=utf-8\r\n"
@@ -408,18 +523,74 @@ async def handle_http_client(
             await http_response(writer, 405, {"status": "error", "detail": "invalid request"})
             return
         method, target = parts[0].upper(), parts[1].split("?", 1)[0]
+        headers: dict[str, str] = {}
         while True:
             line = await asyncio.wait_for(reader.readline(), timeout=2.0)
             if not line or line in {b"\r\n", b"\n"}:
                 break
-        if method != "GET":
-            await http_response(writer, 405, {"status": "error", "detail": "GET required"})
-        elif target == "/health":
+            if b":" in line:
+                name, value_text = line.decode("iso-8859-1").split(":", 1)
+                headers[name.strip().lower()] = value_text.strip()
+
+        if method == "GET" and target == "/health":
             await http_response(writer, 200, {"status": "ok", "service": "UPSflow"})
-        elif target == "/v1/telemetry":
+        elif method == "GET" and target == "/v1/telemetry":
             await http_response(writer, 200, telemetry_snapshot(states, stale_seconds, poll_seconds))
-        elif target == "/":
+        elif method == "GET" and target == "/":
             await http_response(writer, 200, DASHBOARD_HTML, "text/html")
+        elif method == "POST" and target.startswith("/v1/devices/") and target.endswith("/dc/reset"):
+            key = target[len("/v1/devices/"):-len("/dc/reset")].strip("/")
+            if not key:
+                await http_response(writer, 400, {"status": "error", "detail": "device key required"})
+                return
+            try:
+                async with CONTROL_LOCK:
+                    result = await reset_dc_port(states, key)
+                await http_response(writer, 200, result)
+            except KeyError as exc:
+                await http_response(writer, 404, {"status": "error", "detail": str(exc)})
+            except ConnectionError as exc:
+                await http_response(writer, 409, {"status": "error", "detail": str(exc)})
+            except ValueError as exc:
+                await http_response(writer, 409, {"status": "error", "detail": str(exc)})
+            except Exception as exc:
+                LOG.exception("DC reset failed for %s", key)
+                await http_response(writer, 500, {"status": "error", "detail": f"{type(exc).__name__}: {exc}"})
+        elif method == "POST" and target.startswith("/v1/devices/") and target.endswith("/dc"):
+            key = target[len("/v1/devices/"):-len("/dc")].strip("/")
+            if not key:
+                await http_response(writer, 400, {"status": "error", "detail": "device key required"})
+                return
+            try:
+                content_length = int(headers.get("content-length", "0"))
+            except ValueError:
+                await http_response(writer, 400, {"status": "error", "detail": "invalid content-length"})
+                return
+            if content_length <= 0 or content_length > 1024:
+                await http_response(writer, 400, {"status": "error", "detail": "request body required"})
+                return
+            body = await asyncio.wait_for(reader.readexactly(content_length), timeout=2.0)
+            try:
+                payload = json.loads(body.decode("utf-8"))
+                enabled = payload["enabled"]
+                if not isinstance(enabled, bool):
+                    raise ValueError
+            except (ValueError, KeyError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+                await http_response(writer, 400, {"status": "error", "detail": "JSON body must contain boolean 'enabled'"})
+                return
+            try:
+                async with CONTROL_LOCK:
+                    result = await control_dc_port(states, key, enabled)
+                await http_response(writer, 200, result)
+            except KeyError as exc:
+                await http_response(writer, 404, {"status": "error", "detail": str(exc)})
+            except ConnectionError as exc:
+                await http_response(writer, 409, {"status": "error", "detail": str(exc)})
+            except Exception as exc:
+                LOG.exception("DC control failed for %s", key)
+                await http_response(writer, 500, {"status": "error", "detail": f"{type(exc).__name__}: {exc}"})
+        elif method != "GET":
+            await http_response(writer, 405, {"status": "error", "detail": "GET or POST required"})
         else:
             await http_response(writer, 404, {"status": "error", "detail": "not found"})
     except (asyncio.TimeoutError, ConnectionError, UnicodeError):
@@ -500,7 +671,7 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
                     print(line)
                 print()
             print(f"Refresh: {poll_seconds}s   API: http://{http_host}:{http_port}/v1/telemetry   Config: {config_path}")
-            print("Read-only mode: UPSflow sends no EcoFlow control commands.")
+            print("DC control is available through the local HTTP GUI.")
             await asyncio.sleep(poll_seconds)
     finally:
         http_server.close()
@@ -512,6 +683,7 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
 
 
 CONFIG: dict[str, Any] = {}
+CONTROL_LOCK = asyncio.Lock()
 
 
 def main() -> None:
