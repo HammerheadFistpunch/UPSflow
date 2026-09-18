@@ -6,4 +6,5 @@ venv/
 config.json
 .vscode/
 .idea/
-.log
+logs/
+*.log
