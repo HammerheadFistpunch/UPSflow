@@ -322,6 +322,8 @@ async def reset_dc_port(
     current = getattr(state.device, "dc_12v_port", None)
     if not isinstance(current, bool):
         raise ValueError(f"{key} DC state is unknown")
+    if state.stale:
+        raise ValueError(f"{key} DC state is stale")
 
     LOG.info("DC reset %s: initial state=%s", key, current)
     await state.device.enable_dc_12v_port(False)
