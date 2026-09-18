@@ -553,7 +553,7 @@ function currentValue(d, control) {
   if (control === "ac") return raw(d, "ac_ports");
   if (control === "dc") return d.dc_12v_port_on;
   if (control === "xboost") return raw(d, "ac_xboost");
-  if (control === "ac_always_on") return raw(d, "ac_always_on");
+  if (control === "ac_always_on") return null;
   if (control === "energy_backup") return raw(d, "energy_backup");
   if (control === "backup_reserve") return raw(d, "energy_backup_battery_level");
   if (control === "charge_min") return raw(d, "battery_charge_limit_min");
@@ -632,7 +632,10 @@ function makeControl(key, d, control, name, desc, type) {
 
   const state = document.createElement("span");
   state.className = "state";
-  state.textContent = "Current: " + displayCurrent(currentValue(d, control), control);
+  state.dataset.control = control;
+  state.textContent = control === "ac_always_on"
+    ? "Current: Not reported by River 2"
+    : "Current: " + displayCurrent(currentValue(d, control), control);
   row.appendChild(state);
   wrap.appendChild(row);
   return wrap;
@@ -661,6 +664,39 @@ function render(devices) {
   });
 }
 
+function refreshCurrentStates(devices) {
+  Object.entries(devices || {}).forEach(([key, d]) => {
+    const card = [...document.querySelectorAll(".card")].find((node) =>
+      node.querySelector("h2")?.textContent === key.toUpperCase()
+    );
+    if (!card) return;
+
+    card.querySelectorAll(".state[data-control]").forEach((state) => {
+      const control = state.dataset.control;
+      if (control === "ac_always_on") {
+        state.textContent = "Current: Not reported by River 2";
+        return;
+      }
+      state.textContent = "Current: " + displayCurrent(currentValue(d, control), control);
+    });
+
+    card.querySelectorAll("input[id^='input-']").forEach((input) => {
+      if (document.activeElement === input) return;
+      const match = input.id.match(/^input-(.+)-(.+)$/);
+      if (!match) return;
+      const control = match[1];
+      const value = currentValue(d, control);
+      if (value != null && value !== "") input.value = value;
+    });
+
+    const select = card.querySelector("select");
+    if (select && document.activeElement !== select) {
+      const value = String(currentValue(d, "dc_mode") || "").toUpperCase();
+      if (["AUTO", "SOLAR", "CAR"].includes(value)) select.value = value;
+    }
+  });
+}
+
 async function load() {
   const status = document.getElementById("status");
   status.textContent = "Loading telemetry…";
@@ -671,7 +707,8 @@ async function load() {
     clearTimeout(timer);
     if (!response.ok) throw new Error("HTTP " + response.status);
     const payload = await response.json();
-    render(payload.devices);
+    if (!document.querySelector(".card")) render(payload.devices);
+    else refreshCurrentStates(payload.devices);
     status.textContent = "Telemetry loaded " + new Date().toLocaleTimeString();
   } catch (error) {
     status.className = "error";
@@ -706,6 +743,7 @@ async function setControl(key, control, value) {
 }
 
 load();
+setInterval(load, 2000);
 </script></main></body></html>"""
 
 
