@@ -99,9 +99,9 @@ Open this in a browser on the Windows host:
 http://localhost:5005/
 ```
 
-The dashboard shows both UPS units with the primary operating telemetry and a **Show more** section on each device that exposes the full read-only telemetry set returned by UPSflow, including raw `ha-ef-ble` fields and device identity. It refreshes automatically every 2 seconds. Write/test controls are intentionally separated onto the `/controls` page.
+The dashboard shows both UPS units with the primary operating telemetry and a **Show more** section on each device that exposes the full read-only telemetry set returned by UPSflow, including raw `ha-ef-ble` fields and device identity. It refreshes automatically every 2 seconds. All River 2 write controls are separated onto the `/controls` page.
 
-The existing endpoints remain available at `/health` and `/v1/telemetry`. DC control is exposed at `POST /v1/devices/{device}/dc`, and the deterministic five-second reset workflow is exposed at `POST /v1/devices/{device}/dc/reset`.
+The existing endpoints remain available at `/health` and `/v1/telemetry`. The control API is exposed at `POST /v1/devices/{device}/control`; the deterministic five-second DC reset workflow remains available at `POST /v1/devices/{device}/dc/reset`.
 
 The older Tkinter desktop viewer can still be run with `python upsflow_gui.py`, but the browser dashboard is the recommended local display.
 
@@ -173,11 +173,23 @@ The installer uses the Windows LocalSystem account by default. If Windows/Bleak 
 
 The Keymaster container is expected to reach this API at `http://host.docker.internal:5005`.
 
-### DC control
+### Control API
 
-`POST /v1/devices/{device}/dc` with `{"enabled":true}` or `{"enabled":false}` controls the River 2 12V DC output.
+`POST /v1/devices/{device}/control` accepts `{"control":"...","value":...}`. The controls page exposes the River 2 controls implemented by the pinned `ha-ef-ble` River 2 device class:
 
-`POST /v1/devices/{device}/dc/reset` performs the deterministic reset: UPSflow reads the current DC state, requires that state to be known, forces DC OFF, waits five seconds, then forces DC ON. The reset workflow and timing live entirely in UPSflow; Keymaster only requests it.
+- `ac` — AC output on/off
+- `dc` — 12V DC output on/off
+- `xboost` — AC X-Boost on/off
+- `ac_always_on` — AC always-on mode on/off
+- `energy_backup` — Energy Backup on/off
+- `backup_reserve` — Energy Backup reserve percentage
+- `charge_min` — minimum battery discharge limit
+- `charge_max` — maximum battery charge limit
+- `dc_amps` — maximum DC charging current
+- `dc_mode` — `AUTO`, `SOLAR`, or `CAR`
+- `ac_charge_watts` — AC charging power
+
+`POST /v1/devices/{device}/dc/reset` remains available as a deterministic five-second DC reset. UPSflow reads the current DC state, requires that state to be known, forces DC OFF, waits five seconds, then forces DC ON. The reset workflow and timing live entirely in UPSflow; Keymaster only requests it.
 
 The reset endpoint fails closed if the current DC state cannot be determined and never blindly toggles an unknown state.
 
@@ -195,4 +207,4 @@ The reset endpoint fails closed if the current DC state cannot be determined and
 
 ## Control boundary
 
-UPSflow owns EcoFlow control operations exposed through its local API. Current control is limited to the River 2 12V DC output and its deterministic reset workflow. Keymaster does not implement or time EcoFlow control operations. AC, USB, charging-limit, and operating-mode controls remain unimplemented.
+UPSflow owns EcoFlow control operations exposed through its local API. Keymaster does not implement or time EcoFlow control operations. The controls page/API currently mirrors the actual write methods available in the pinned River 2 implementation.
