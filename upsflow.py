@@ -239,10 +239,25 @@ def json_value(raw: Any) -> Any:
     return str(raw)
 
 
+def dc_12v_state(device: UPSFlowRiver2) -> bool | None:
+    """Return the native 12V DC port state without conflating missing with OFF."""
+    raw = getattr(device, "dc_12v_port", None)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)) and raw in (0, 1):
+        return bool(raw)
+    raw_value = getattr(raw, "value", None)
+    if isinstance(raw_value, bool):
+        return raw_value
+    if isinstance(raw_value, (int, float)) and raw_value in (0, 1):
+        return bool(raw_value)
+    return None
+
+
 def telemetry_device(state: DeviceState, stale_seconds: int) -> dict[str, Any]:
     d = state.device
     battery = float(value(d, "battery_level", 0))
-    dc_12v_on = bool(getattr(d, "dc_12v_port", False))
+    dc_12v_on = dc_12v_state(d)
     ac_w = float(value(d, "ac_input_power", 0))
     ac_v = float(value(d, "ac_input_voltage", 0))
     ac_out_w = float(value(d, "ac_output_power", 0))
@@ -309,34 +324,54 @@ async def control_dc_port(
     }
 
 
+async def wait_for_dc_state(
+    state: DeviceState, expected: bool, timeout_seconds: float = 10.0
+) -> bool:
+    """Wait for the device's native DC state to reflect an expected value."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        current = dc_12v_state(state.device)
+        if current is expected:
+            return True
+        await asyncio.sleep(0.25)
+    return False
+
+
 async def reset_dc_port(
     states: list[DeviceState], key: str, delay_seconds: float = 5.0
 ) -> dict[str, Any]:
-    """Force a known DC OFF interval, then restore DC ON."""
+    """Reset DC: verify current state, force OFF, verify, wait, then force ON and verify."""
     state = find_device(states, key)
     if state is None:
         raise KeyError(f"device not configured: {key}")
     if not state.device.is_connected:
         raise ConnectionError(f"{key} is not connected")
-
-    current = getattr(state.device, "dc_12v_port", None)
-    if not isinstance(current, bool):
-        raise ValueError(f"{key} DC state is unknown")
     if state.stale:
-        raise ValueError(f"{key} DC state is stale")
+        raise ValueError(f"{key} DC telemetry is stale")
+
+    current = dc_12v_state(state.device)
+    if current is None:
+        raise ValueError(f"{key} DC state is unknown")
 
     LOG.info("DC reset %s: initial state=%s", key, current)
     await state.device.enable_dc_12v_port(False)
+    if not await wait_for_dc_state(state, False):
+        raise RuntimeError(f"{key} DC OFF state was not confirmed")
+
     await asyncio.sleep(delay_seconds)
+
     await state.device.enable_dc_12v_port(True)
-    LOG.info("DC reset %s complete: final requested state=True", key)
+    if not await wait_for_dc_state(state, True):
+        raise RuntimeError(f"{key} DC ON state was not confirmed")
+
+    LOG.info("DC reset %s complete: initial=%s final=True", key, current)
     return {
         "status": "ok",
         "device": key,
         "control": "dc_12v_port_reset",
         "initial_state": current,
         "off_seconds": delay_seconds,
-        "final_requested": True,
+        "final_state": True,
     }
 
 
