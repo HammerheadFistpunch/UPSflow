@@ -509,6 +509,8 @@ async def handle_http_client(
             await http_response(writer, 200, telemetry_snapshot(states, stale_seconds, poll_seconds))
         elif method == "GET" and target == "/":
             await http_response(writer, 200, DASHBOARD_HTML, "text/html")
+        elif method == "GET" and target == "/controls":
+            await http_response(writer, 200, CONTROLS_HTML, "text/html")
         elif method == "POST" and target.startswith("/v1/devices/") and target.endswith("/dc/reset"):
             key = target[len("/v1/devices/"):-len("/dc/reset")].strip("/")
             if not key:
