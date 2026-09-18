@@ -1,3 +1,4 @@
+[CmdletBinding()]
 param(
     [string]$NssmPath = "",
     [string]$ServiceName = "UPSflow"
