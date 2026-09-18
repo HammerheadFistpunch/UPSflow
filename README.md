@@ -99,7 +99,7 @@ Open this in a browser on the Windows host:
 http://localhost:5005/
 ```
 
-The dashboard shows both UPS units, BLE state, battery, AC presence/voltage/power, solar, total input, output, DC state, telemetry age, and errors, with direct DC ON/OFF controls. It refreshes automatically every 2 seconds.
+The dashboard shows both UPS units with the primary operating telemetry and a **Show more** section on each device that exposes the full read-only telemetry set returned by UPSflow, including raw `ha-ef-ble` fields and device identity. It refreshes automatically every 2 seconds. Write/test controls are intentionally separated onto the `/controls` page.
 
 The existing endpoints remain available at `/health` and `/v1/telemetry`. DC control is exposed at `POST /v1/devices/{device}/dc`, and the deterministic five-second reset workflow is exposed at `POST /v1/devices/{device}/dc/reset`.
 
