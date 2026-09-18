@@ -207,13 +207,85 @@ def telemetry_snapshot(states: list[DeviceState], stale_seconds: int) -> dict[st
     }
 
 
-async def http_response(writer: asyncio.StreamWriter, status: int, payload: dict[str, Any]) -> None:
-    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+DASHBOARD_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UPSflow</title>
+<style>
+body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f4f6;color:#17202a}
+main{max-width:900px;margin:0 auto;padding:24px}
+h1{margin:0 0 4px} .sub{color:#667085;margin-bottom:20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+.card{background:white;border:1px solid #d9dee5;border-radius:10px;padding:18px;box-shadow:0 1px 2px #0001}
+h2{margin:0 0 14px}.row{display:flex;justify-content:space-between;border-top:1px solid #eee;padding:8px 0}
+.label{color:#667085}.value{font-variant-numeric:tabular-nums}
+.error{color:#b42318}.ok{color:#067647}.stale{color:#b54708}
+footer{margin-top:18px;color:#667085;font-size:13px}
+</style>
+</head>
+<body>
+<main>
+<h1>UPSflow</h1>
+<div class="sub">EcoFlow River 2 telemetry — read only</div>
+<div id="grid" class="grid"></div>
+<footer id="status">Loading…</footer>
+</main>
+<script>
+const esc = s => String(s ?? "—");
+function card(key,d){
+  const connected = d.connected ? '<span class="ok">Connected</span>' : '<span>Disconnected</span>';
+  const ac = d.ac_present ? '<span class="ok">YES</span>' : '<span>NO</span>';
+  const age = d.stale ? '<span class="stale">STALE</span>' :
+    d.telemetry_age_seconds == null ? 'Never' : Math.round(d.telemetry_age_seconds)+'s ago';
+  const err = d.error ? '<div class="row"><span class="label">Error</span><span class="value error">'+esc(d.error)+'</span></div>' : '';
+  return '<section class="card"><h2>'+esc(key).toUpperCase()+'</h2>'+
+    '<div class="row"><span class="label">BLE</span><span class="value">'+connected+'</span></div>'+
+    '<div class="row"><span class="label">Battery</span><span class="value">'+Number(d.battery_percent||0).toFixed(1)+'%</span></div>'+
+    '<div class="row"><span class="label">AC input</span><span class="value">'+ac+'</span></div>'+
+    '<div class="row"><span class="label">AC volts</span><span class="value">'+Number(d.ac_voltage||0).toFixed(1)+' V</span></div>'+
+    '<div class="row"><span class="label">AC watts</span><span class="value">'+Math.round(d.ac_watts||0)+' W</span></div>'+
+    '<div class="row"><span class="label">Solar</span><span class="value">'+Math.round(d.solar_watts||0)+' W</span></div>'+
+    '<div class="row"><span class="label">Total input</span><span class="value">'+Math.round(d.total_input_watts||0)+' W</span></div>'+
+    '<div class="row"><span class="label">Output</span><span class="value">'+Math.round(d.output_watts||0)+' W</span></div>'+
+    '<div class="row"><span class="label">Telemetry</span><span class="value">'+age+'</span></div>'+err+
+    '</section>';
+}
+async function refresh(){
+  try{
+    const r=await fetch('/v1/telemetry',{cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const p=await r.json();
+    document.getElementById('grid').innerHTML=Object.entries(p.devices||{}).map(([k,d])=>card(k,d)).join('');
+    document.getElementById('status').textContent='Updated '+new Date().toLocaleTimeString()+' · Read-only · Refreshing every 2 seconds';
+  }catch(e){
+    document.getElementById('status').textContent='Telemetry unavailable: '+e;
+  }
+}
+refresh(); setInterval(refresh,2000);
+</script>
+</body>
+</html>
+"""
+
+
+async def http_response(
+    writer: asyncio.StreamWriter,
+    status: int,
+    payload: dict[str, Any] | str,
+    content_type: str = "application/json",
+) -> None:
+    if isinstance(payload, str):
+        body = payload.encode("utf-8")
+    else:
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     reason = {200: "OK", 404: "Not Found", 405: "Method Not Allowed"}.get(status, "Error")
     headers = (
         f"HTTP/1.1 {status} {reason}\r\n"
-        "Content-Type: application/json\r\n"
+        f"Content-Type: {content_type}; charset=utf-8\r\n"
         f"Content-Length: {len(body)}\r\n"
+        "Cache-Control: no-store\r\n"
         "Connection: close\r\n\r\n"
     ).encode("ascii")
     writer.write(headers + body)
@@ -245,6 +317,8 @@ async def handle_http_client(
             await http_response(writer, 200, {"status": "ok", "service": "UPSflow"})
         elif target == "/v1/telemetry":
             await http_response(writer, 200, telemetry_snapshot(states, stale_seconds))
+        elif target == "/":
+            await http_response(writer, 200, DASHBOARD_HTML, "text/html")
         else:
             await http_response(writer, 404, {"status": "error", "detail": "not found"})
     except (asyncio.TimeoutError, ConnectionError, UnicodeError):
