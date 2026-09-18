@@ -474,11 +474,13 @@ function formatRemainingTime(seconds){
 }
 function remainingTimeRow(d,net){
  const raw=d.raw_telemetry||{};
- const charging=raw.remaining_time_charging;
- const discharging=raw.remaining_time_discharging;
- if(net>0 && charging!=null && Number(charging)>0)
+ const charging=Number(raw.remaining_time_charging);
+ const discharging=Number(raw.remaining_time_discharging);
+ // River 2 reports 5999 as the upper/sentinel value when a charge estimate is unavailable.
+ const validTime=v=>Number.isFinite(v)&&v>0&&v<5999;
+ if(net>0 && validTime(charging))
    return '<div class="row"><span class="label">Time to charge</span><span class="value positive">+'+formatRemainingTime(charging)+'</span></div>';
- if(net<0 && discharging!=null && Number(discharging)>0)
+ if(net<0 && validTime(discharging))
    return '<div class="row"><span class="label">Time to discharge</span><span class="value negative">-'+formatRemainingTime(discharging)+'</span></div>';
  return '<div class="row"><span class="label">Time remaining</span><span class="value">—</span></div>';
 }
