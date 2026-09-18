@@ -15,3 +15,20 @@
 2026-09-18 15:40:01,942 INFO eflib.connection - 24:EC:4A:81:E1:1D: Auth completed, everything is fine
 2026-09-18 15:40:01,942 INFO upsflow: server authenticated: authenticated
 2026-09-18 15:40:01,943 INFO upsflow: Telemetry API listening on 0.0.0.0:5005
+2026-09-18 15:38:00,679 INFO upsflow: Connecting network (68:67:25:E8:DD:29)
+2026-09-18 15:38:00,680 INFO __main__ - 68:67:25:E8:DD:29: Connecting to River 2
+2026-09-18 15:38:00,680 INFO eflib.connection - 68:67:25:E8:DD:29: Connecting to device
+2026-09-18 15:38:00,707 INFO upsflow: Connecting server (24:EC:4A:81:E1:1D)
+2026-09-18 15:38:00,707 INFO __main__ - 24:EC:4A:81:E1:1D: Connecting to River 2
+2026-09-18 15:38:00,707 INFO eflib.connection - 24:EC:4A:81:E1:1D: Connecting to device
+2026-09-18 15:38:02,032 INFO eflib.connection - 24:EC:4A:81:E1:1D: Connected
+2026-09-18 15:38:02,032 INFO eflib.connection - 24:EC:4A:81:E1:1D: Init completed, starting auth routine...
+2026-09-18 15:38:02,425 INFO eflib.connection - 68:67:25:E8:DD:29: Connected
+2026-09-18 15:38:02,425 INFO eflib.connection - 68:67:25:E8:DD:29: Init completed, starting auth routine...
+2026-09-18 15:38:02,519 INFO eflib.connection - 24:EC:4A:81:E1:1D: autoAuthentication: Sending secretKey consists of user id and device serial number
+2026-09-18 15:38:02,594 INFO eflib.connection - 24:EC:4A:81:E1:1D: Auth completed, everything is fine
+2026-09-18 15:38:02,595 INFO upsflow: server authenticated: authenticated
+2026-09-18 15:38:02,838 INFO eflib.connection - 68:67:25:E8:DD:29: autoAuthentication: Sending secretKey consists of user id and device serial number
+2026-09-18 15:38:02,913 INFO eflib.connection - 68:67:25:E8:DD:29: Auth completed, everything is fine
+2026-09-18 15:38:02,914 INFO upsflow: network authenticated: authenticated
+2026-09-18 15:38:02,915 INFO upsflow: Telemetry API listening on 0.0.0.0:5005
