@@ -1,6 +1,6 @@
 # UPSflow
 
-UPSflow is a small Windows-native, read-only BLE monitor for two EcoFlow River 2 units. It is the telemetry source for the Keymaster/RFZ query chain.
+UPSflow is a small Windows-native BLE monitor/control service for two EcoFlow River 2 units. It is the telemetry and deterministic power-control source for the Keymaster/RFZ command chain.
 
 UPSflow maintains the BLE telemetry stream continuously and exposes the latest cached state through a small local HTTP API. The console `poll_seconds` setting only controls how often the display redraws.
 
@@ -99,9 +99,9 @@ Open this in a browser on the Windows host:
 http://localhost:5005/
 ```
 
-The dashboard shows both UPS units, BLE state, battery, AC presence/voltage/power, solar, total input, output, telemetry age, and errors. It refreshes automatically every 2 seconds.
+The dashboard shows both UPS units, BLE state, battery, AC presence/voltage/power, solar, total input, output, DC state, telemetry age, and errors, with direct DC ON/OFF controls. It refreshes automatically every 2 seconds.
 
-The existing endpoints remain available at `/health` and `/v1/telemetry`.
+The existing endpoints remain available at `/health` and `/v1/telemetry`. DC control is exposed at `POST /v1/devices/{device}/dc`, and the deterministic five-second reset workflow is exposed at `POST /v1/devices/{device}/dc/reset`.
 
 The older Tkinter desktop viewer can still be run with `python upsflow_gui.py`, but the browser dashboard is the recommended local display.
 
@@ -165,13 +165,21 @@ To remove the service without deleting UPSflow files or logs:
 
 The installer uses the Windows LocalSystem account by default. If Windows/Bleak does not permit the service to access the River 2 BLE devices under LocalSystem, configure the NSSM service to run under the same Windows user account that successfully runs `upsflow.py monitor` interactively. The application itself does not require an interactive GUI session.
 
-## Telemetry API
+## Telemetry and control API
 
 `GET /health` returns a simple service-health response.
 
 `GET /v1/telemetry` returns the latest cached telemetry for the configured `server` and `network` River 2s. It is read-only and does not expose EcoFlow credentials or control operations.
 
 The Keymaster container is expected to reach this API at `http://host.docker.internal:5005`.
+
+### DC control
+
+`POST /v1/devices/{device}/dc` with `{"enabled":true}` or `{"enabled":false}` controls the River 2 12V DC output.
+
+`POST /v1/devices/{device}/dc/reset` performs the deterministic reset: UPSflow reads the current DC state, requires that state to be known, forces DC OFF, waits five seconds, then forces DC ON. The reset workflow and timing live entirely in UPSflow; Keymaster only requests it.
+
+The reset endpoint fails closed if the current DC state cannot be determined and never blindly toggles an unknown state.
 
 ## What to test first
 
@@ -185,6 +193,6 @@ The Keymaster container is expected to reach this API at `http://host.docker.int
 8. Start the GUI and confirm it follows the same telemetry without interrupting the service.
 9. Reboot Windows and confirm the UPSflow service starts automatically.
 
-## Read-only by design
+## Control boundary
 
-UPSflow does not implement EcoFlow control operations. It will never turn AC/DC/USB outputs on or off, change charging limits, or change the River 2 operating mode.
+UPSflow owns EcoFlow control operations exposed through its local API. Current control is limited to the River 2 12V DC output and its deterministic reset workflow. Keymaster does not implement or time EcoFlow control operations. AC, USB, charging-limit, and operating-mode controls remain unimplemented.
