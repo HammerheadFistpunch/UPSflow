@@ -343,7 +343,7 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
 
     device_entries = config.get("devices", {})
     states: list[DeviceState] = []
-    for key in ("server", "network"):
+    for key in ("network", "server"):
         entry = device_entries.get(key, {})
         address = str(entry.get("address", "")).strip()
         if not address or address.startswith("BLE_ADDRESS_"):
