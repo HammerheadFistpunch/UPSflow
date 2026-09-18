@@ -9,7 +9,6 @@ $ErrorActionPreference = "Stop"
 $AppDir = $PSScriptRoot
 $Python = Join-Path $AppDir ".venv\Scripts\python.exe"
 $Script = Join-Path $AppDir "upsflow.py"
-$LogDir = Join-Path $AppDir "logs"
 
 if (-not (Test-Path $Python)) {
     throw "UPSflow Python environment not found at $Python. Run the setup steps in README.md first."
@@ -29,8 +28,6 @@ if ([string]::IsNullOrWhiteSpace($NssmPath)) {
 if (-not (Test-Path $NssmPath)) {
     throw "NSSM executable not found: $NssmPath"
 }
-
-New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 # Stopping/removing a not-yet-existing service writes an expected message to stderr.
 # On PowerShell 7+, $PSNativeCommandUseErrorActionPreference can turn that stderr
@@ -56,19 +53,14 @@ $PSNativeCommandUseErrorActionPreference = $prevNativeEAP
 & $NssmPath set $ServiceName AppExit Default Restart
 & $NssmPath set $ServiceName AppRestartDelay 5000
 
-# monitor's screen-refresh output is intentionally discarded when running as a service.
-# Python logging goes to stderr and is retained below for diagnostics.
+# Service output is intentionally discarded; UPSflow does not write runtime log files.
 & $NssmPath set $ServiceName AppStdout NUL
-& $NssmPath set $ServiceName AppStderr (Join-Path $LogDir "service-error.log")
-& $NssmPath set $ServiceName AppRotateFiles 1
-& $NssmPath set $ServiceName AppRotateOnline 1
-& $NssmPath set $ServiceName AppRotateBytes 10485760
+& $NssmPath set $ServiceName AppStderr NUL
 
 Write-Host "UPSflow service installed."
 Write-Host "  Service: $ServiceName"
 Write-Host "  Program: $Python"
 Write-Host "  Arguments: $Script monitor"
-Write-Host "  Error log: $(Join-Path $LogDir 'service-error.log')"
 Write-Host ""
 Write-Host "Start it with:  Start-Service $ServiceName"
 Write-Host "Check it with:  Get-Service $ServiceName"
