@@ -140,14 +140,31 @@ def value(device: UPSFlowRiver2, name: str, default: float | int = 0) -> float |
     return default if result is None else result
 
 
+def dc_mode_label(mode: Any) -> str:
+    """Return the stable display/API label for eflib's DCMode value."""
+    if mode is None:
+        return "UNKNOWN"
+    label = getattr(mode, "name", None)
+    if label:
+        return str(label).upper()
+    text = str(mode).upper()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return text
+
+
 def format_device(state: DeviceState, stale_seconds: int) -> list[str]:
     d = state.device
     battery = value(d, "battery_level", 0)
     ac_w = value(d, "ac_input_power", 0)
     ac_v = value(d, "ac_input_voltage", 0)
-    solar_w = value(d, "solar_input_power", 0)
+    dc_w = value(d, "dc_port_input_power", 0)
+    dc_mode = dc_mode_label(getattr(d, "dc_mode", None))
     total_in = value(d, "input_power", 0)
+    dc12_w = value(d, "dc12v_output_power", 0)
+    usb_w = float(value(d, "usba_output_power", 0)) + float(value(d, "usbc_output_power", 0))
     output = value(d, "output_power", 0)
+    net = float(total_in) - float(output)
 
     age = "never"
     if state.last_update:
@@ -161,11 +178,14 @@ def format_device(state: DeviceState, stale_seconds: int) -> list[str]:
     lines.append(f"  BLE:       {'Connected' if d.is_connected else 'Disconnected'}")
     lines.append(f"  Battery:   {battery:.1f}%")
     lines.append(f"  AC input:  {'YES' if ac_present else 'NO'}")
-    lines.append(f"  AC volts:  {ac_v:.1f} V")
     lines.append(f"  AC watts:  {ac_w:.0f} W")
-    lines.append(f"  Solar:     {solar_w:.0f} W")
+    lines.append(f"  DC In:     {dc_w:.0f} W")
+    lines.append(f"  DC State:  {dc_mode}")
     lines.append(f"  Total in:  {total_in:.0f} W")
-    lines.append(f"  Output:    {output:.0f} W")
+    lines.append(f"  12V out:   {dc12_w:.0f} W")
+    lines.append(f"  USB out:   {usb_w:.0f} W")
+    lines.append(f"  Total out: {output:.0f} W")
+    lines.append(f"  Net power: {net:+.0f} W")
     lines.append(f"  Telemetry: {'STALE' if stale else age + ' ago'}")
     if state.last_error:
         lines.append(f"  Error:     {state.last_error}")
@@ -177,9 +197,15 @@ def telemetry_device(state: DeviceState, stale_seconds: int) -> dict[str, Any]:
     battery = float(value(d, "battery_level", 0))
     ac_w = float(value(d, "ac_input_power", 0))
     ac_v = float(value(d, "ac_input_voltage", 0))
-    solar_w = float(value(d, "solar_input_power", 0))
+    dc_w = float(value(d, "dc_port_input_power", 0))
+    dc_mode = dc_mode_label(getattr(d, "dc_mode", None))
     total_in = float(value(d, "input_power", 0))
+    dc12_w = float(value(d, "dc12v_output_power", 0))
+    usba_w = float(value(d, "usba_output_power", 0))
+    usbc_w = float(value(d, "usbc_output_power", 0))
+    usb_w = usba_w + usbc_w
     output = float(value(d, "output_power", 0))
+    net = total_in - output
     age = None if state.last_update == 0 else max(0.0, time.monotonic() - state.last_update)
     threshold = float(CONFIG.get("ac_present_voltage", 80.0))
     stale = age is None or age > stale_seconds
@@ -189,19 +215,28 @@ def telemetry_device(state: DeviceState, stale_seconds: int) -> dict[str, Any]:
         "ac_present": ac_v >= threshold,
         "ac_voltage": ac_v,
         "ac_watts": ac_w,
-        "solar_watts": solar_w,
+        "dc_in_watts": dc_w,
+        "dc_state": dc_mode,
         "total_input_watts": total_in,
+        "dc12v_output_watts": dc12_w,
+        "usba_output_watts": usba_w,
+        "usbc_output_watts": usbc_w,
+        "usb_output_watts": usb_w,
         "output_watts": output,
+        "net_watts": net,
         "telemetry_age_seconds": age,
         "stale": stale,
         "error": state.last_error,
     }
 
 
-def telemetry_snapshot(states: list[DeviceState], stale_seconds: int) -> dict[str, Any]:
+def telemetry_snapshot(
+    states: list[DeviceState], stale_seconds: int, poll_seconds: int
+) -> dict[str, Any]:
     return {
         "service": "UPSflow",
         "read_only": True,
+        "poll_seconds": poll_seconds,
         "stale_seconds": stale_seconds,
         "devices": {state.key: telemetry_device(state, stale_seconds) for state in states},
     }
@@ -221,7 +256,7 @@ h1{margin:0 0 4px} .sub{color:#667085;margin-bottom:20px}
 .card{background:white;border:1px solid #d9dee5;border-radius:10px;padding:18px;box-shadow:0 1px 2px #0001}
 h2{margin:0 0 14px}.row{display:flex;justify-content:space-between;border-top:1px solid #eee;padding:8px 0}
 .label{color:#667085}.value{font-variant-numeric:tabular-nums}
-.error{color:#b42318}.ok{color:#067647}.stale{color:#b54708}
+.error{color:#b42318}.ok{color:#067647}.stale{color:#b54708}.positive{color:#067647}.negative{color:#b42318}
 footer{margin-top:18px;color:#667085;font-size:13px}
 </style>
 </head>
@@ -237,6 +272,8 @@ const esc = s => String(s ?? "—");
 function card(key,d){
   const connected = d.connected ? '<span class="ok">Connected</span>' : '<span>Disconnected</span>';
   const ac = d.ac_present ? '<span class="ok">YES</span>' : '<span>NO</span>';
+  const net = Number(d.net_watts||0);
+  const netClass = net >= 0 ? 'positive' : 'negative';
   const age = d.stale ? '<span class="stale">STALE</span>' :
     d.telemetry_age_seconds == null ? 'Never' : Math.round(d.telemetry_age_seconds)+'s ago';
   const err = d.error ? '<div class="row"><span class="label">Error</span><span class="value error">'+esc(d.error)+'</span></div>' : '';
@@ -244,11 +281,14 @@ function card(key,d){
     '<div class="row"><span class="label">BLE</span><span class="value">'+connected+'</span></div>'+
     '<div class="row"><span class="label">Battery</span><span class="value">'+Number(d.battery_percent||0).toFixed(1)+'%</span></div>'+
     '<div class="row"><span class="label">AC input</span><span class="value">'+ac+'</span></div>'+
-    '<div class="row"><span class="label">AC volts</span><span class="value">'+Number(d.ac_voltage||0).toFixed(1)+' V</span></div>'+
-    '<div class="row"><span class="label">AC watts</span><span class="value">'+Math.round(d.ac_watts||0)+' W</span></div>'+
-    '<div class="row"><span class="label">Solar</span><span class="value">'+Math.round(d.solar_watts||0)+' W</span></div>'+
-    '<div class="row"><span class="label">Total input</span><span class="value">'+Math.round(d.total_input_watts||0)+' W</span></div>'+
-    '<div class="row"><span class="label">Output</span><span class="value">'+Math.round(d.output_watts||0)+' W</span></div>'+
+    '<div class="row"><span class="label">AC In</span><span class="value">'+Math.round(d.ac_watts||0)+' W</span></div>'+
+    '<div class="row"><span class="label">DC In</span><span class="value">'+Math.round(d.dc_in_watts||0)+' W</span></div>'+
+    '<div class="row"><span class="label">DC State</span><span class="value">'+esc(d.dc_state)+'</span></div>'+
+    '<div class="row"><span class="label">Total Input</span><span class="value">'+Math.round(d.total_input_watts||0)+' W</span></div>'+
+    '<div class="row"><span class="label">12V out</span><span class="value">'+Math.round(d.dc12v_output_watts||0)+' W</span></div>'+
+    '<div class="row"><span class="label">USB out</span><span class="value">'+Math.round(d.usb_output_watts||0)+' W</span></div>'+
+    '<div class="row"><span class="label">Total Output</span><span class="value">'+Math.round(d.output_watts||0)+' W</span></div>'+
+    '<div class="row"><span class="label">Net power</span><span class="value '+netClass+'">'+(net >= 0 ? '+' : '')+Math.round(net)+' W</span></div>'+
     '<div class="row"><span class="label">Telemetry</span><span class="value">'+age+'</span></div>'+err+
     '</section>';
 }
@@ -258,12 +298,17 @@ async function refresh(){
     if(!r.ok) throw new Error('HTTP '+r.status);
     const p=await r.json();
     document.getElementById('grid').innerHTML=Object.entries(p.devices||{}).map(([k,d])=>card(k,d)).join('');
-    document.getElementById('status').textContent='Updated '+new Date().toLocaleTimeString()+' · Read-only · Refreshing every 2 seconds';
+    const seconds = Number(p.poll_seconds) > 0 ? Number(p.poll_seconds) : 2;
+    document.getElementById('status').textContent='Updated '+new Date().toLocaleTimeString()+' · Read-only · Configured refresh '+seconds+'s';
+    window.__upsflowPollMs = seconds * 1000;
   }catch(e){
     document.getElementById('status').textContent='Telemetry unavailable: '+e;
+    window.__upsflowPollMs = window.__upsflowPollMs || 2000;
+  }finally{
+    setTimeout(refresh, window.__upsflowPollMs || 2000);
   }
 }
-refresh(); setInterval(refresh,2000);
+refresh();
 </script>
 </body>
 </html>
@@ -299,6 +344,7 @@ async def handle_http_client(
     writer: asyncio.StreamWriter,
     states: list[DeviceState],
     stale_seconds: int,
+    poll_seconds: int,
 ) -> None:
     try:
         request_line = await asyncio.wait_for(reader.readline(), timeout=2.0)
@@ -316,7 +362,7 @@ async def handle_http_client(
         elif target == "/health":
             await http_response(writer, 200, {"status": "ok", "service": "UPSflow"})
         elif target == "/v1/telemetry":
-            await http_response(writer, 200, telemetry_snapshot(states, stale_seconds))
+            await http_response(writer, 200, telemetry_snapshot(states, stale_seconds, poll_seconds))
         elif target == "/":
             await http_response(writer, 200, DASHBOARD_HTML, "text/html")
         else:
@@ -380,7 +426,9 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
     http_host = str(config.get("http_host", "0.0.0.0")).strip() or "0.0.0.0"
     http_port = max(1, int(config.get("http_port", 5005)))
     http_server = await asyncio.start_server(
-        lambda reader, writer: handle_http_client(reader, writer, states, stale_seconds),
+        lambda reader, writer: handle_http_client(
+            reader, writer, states, stale_seconds, poll_seconds
+        ),
         http_host,
         http_port,
     )

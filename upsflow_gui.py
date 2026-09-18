@@ -9,17 +9,17 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 DEFAULT_API = "http://127.0.0.1:5005"
-POLL_MS = 2000
+DEFAULT_POLL_SECONDS = 2
 
 
 class UPSflowGUI(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("UPSflow")
-        self.geometry("560x620")
-        self.minsize(500, 560)
+        self.geometry("560x700")
+        self.minsize(500, 640)
 
-        self.api_base = self._load_api_base()
+        self.api_base, self.poll_ms = self._load_config()
         self.status_var = tk.StringVar(value="Checking UPSflow…")
         self.api_var = tk.StringVar(value=f"API: {self.api_base}")
         self.read_only_var = tk.StringVar(value="Read-only")
@@ -31,18 +31,18 @@ class UPSflowGUI(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.after(100, self._poll)
 
-    def _load_api_base(self) -> str:
+    def _load_config(self) -> tuple[str, int]:
         config_path = Path(__file__).resolve().parent / "config.json"
         try:
             config = json.loads(config_path.read_text(encoding="utf-8"))
             host = str(config.get("http_host", "0.0.0.0"))
             port = int(config.get("http_port", 5005))
-            # The GUI is local; 0.0.0.0 is a bind address, not a useful client target.
+            poll_seconds = max(1, int(config.get("poll_seconds", DEFAULT_POLL_SECONDS)))
             if host in {"", "0.0.0.0", "::"}:
                 host = "127.0.0.1"
-            return f"http://{host}:{port}"
+            return f"http://{host}:{port}", poll_seconds * 1000
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return DEFAULT_API
+            return DEFAULT_API, DEFAULT_POLL_SECONDS * 1000
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=14)
@@ -54,7 +54,9 @@ class UPSflowGUI(tk.Tk):
         ttk.Label(header, textvariable=self.status_var).pack(side="right")
 
         ttk.Label(outer, textvariable=self.api_var).pack(anchor="w")
-        ttk.Label(outer, textvariable=self.read_only_var).pack(anchor="w", pady=(2, 10))
+        ttk.Label(
+            outer, text=f"Read-only • Refresh: {self.poll_ms / 1000:g}s"
+        ).pack(anchor="w", pady=(2, 10))
 
         for key, title in (("server", "SERVER"), ("network", "NETWORK")):
             self._add_device_card(outer, key, title)
@@ -72,17 +74,20 @@ class UPSflowGUI(tk.Tk):
             ("BLE", "ble"),
             ("Battery", "battery"),
             ("AC input", "ac"),
-            ("AC volts", "voltage"),
-            ("AC watts", "ac_watts"),
-            ("Solar", "solar"),
-            ("Total in", "total"),
-            ("Output", "output"),
+            ("AC In", "ac_watts"),
+            ("DC In", "dc_watts"),
+            ("DC State", "dc_state"),
+            ("Total Input", "total"),
+            ("12V out", "dc12"),
+            ("USB out", "usb"),
+            ("Total Output", "output"),
+            ("Net power", "net"),
             ("Telemetry", "age"),
             ("Error", "error"),
         )
         values: dict[str, tk.StringVar] = {}
         for row, (label, name) in enumerate(fields):
-            ttk.Label(frame, text=f"{label}:", width=12).grid(row=row, column=0, sticky="w")
+            ttk.Label(frame, text=f"{label}:", width=13).grid(row=row, column=0, sticky="w")
             var = tk.StringVar(value="—")
             values[name] = var
             ttk.Label(frame, textvariable=var).grid(row=row, column=1, sticky="w")
@@ -91,11 +96,11 @@ class UPSflowGUI(tk.Tk):
     def _poll(self) -> None:
         if self._closed or self._request_in_flight:
             if not self._closed:
-                self.after(POLL_MS, self._poll)
+                self.after(self.poll_ms, self._poll)
             return
         self._request_in_flight = True
         threading.Thread(target=self._fetch, daemon=True).start()
-        self.after(POLL_MS, self._poll)
+        self.after(self.poll_ms, self._poll)
 
     def _fetch(self) -> None:
         try:
@@ -110,7 +115,10 @@ class UPSflowGUI(tk.Tk):
 
     def _apply(self, payload: dict) -> None:
         self.status_var.set("● Connected")
-        self.read_only_var.set("Read-only • EcoFlow control is not available in UPSflow")
+        configured_poll = payload.get("poll_seconds")
+        if isinstance(configured_poll, (int, float)) and configured_poll > 0:
+            self.poll_ms = max(1000, int(configured_poll * 1000))
+        self.read_only_var.set(f"Read-only • Refresh: {self.poll_ms / 1000:g}s")
         devices = payload.get("devices", {})
         for key, values in self.cards.items():
             d = devices.get(key)
@@ -121,11 +129,15 @@ class UPSflowGUI(tk.Tk):
             values["ble"].set("Connected" if d.get("connected") else "Disconnected")
             values["battery"].set(f"{float(d.get('battery_percent', 0)):.1f}%")
             values["ac"].set("YES" if d.get("ac_present") else "NO")
-            values["voltage"].set(f"{float(d.get('ac_voltage', 0)):.1f} V")
             values["ac_watts"].set(f"{float(d.get('ac_watts', 0)):.0f} W")
-            values["solar"].set(f"{float(d.get('solar_watts', 0)):.0f} W")
+            values["dc_watts"].set(f"{float(d.get('dc_in_watts', 0)):.0f} W")
+            values["dc_state"].set(str(d.get("dc_state") or "UNKNOWN"))
             values["total"].set(f"{float(d.get('total_input_watts', 0)):.0f} W")
+            values["dc12"].set(f"{float(d.get('dc12v_output_watts', 0)):.0f} W")
+            values["usb"].set(f"{float(d.get('usb_output_watts', 0)):.0f} W")
             values["output"].set(f"{float(d.get('output_watts', 0)):.0f} W")
+            net = float(d.get("net_watts", 0))
+            values["net"].set(f"{net:+.0f} W")
             age = d.get("telemetry_age_seconds")
             if d.get("stale"):
                 values["age"].set("STALE")
