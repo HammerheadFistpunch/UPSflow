@@ -273,6 +273,7 @@ def telemetry_device(state: DeviceState, stale_seconds: int) -> dict[str, Any]:
         "dc_in_watts": dc_w,
         "dc_state": dc_mode,
         "dc_12v_port_on": dc_12v_on,
+        "dc_enabled": dc_12v_on,
         "total_input_watts": total_in,
         "dc12v_output_watts": dc12_w,
         "usba_output_watts": usba_w,
@@ -308,12 +309,41 @@ async def control_dc_port(
     }
 
 
+async def reset_dc_port(
+    states: list[DeviceState], key: str, delay_seconds: float = 5.0
+) -> dict[str, Any]:
+    """Force a known DC OFF interval, then restore DC ON."""
+    state = find_device(states, key)
+    if state is None:
+        raise KeyError(f"device not configured: {key}")
+    if not state.device.is_connected:
+        raise ConnectionError(f"{key} is not connected")
+
+    current = getattr(state.device, "dc_12v_port", None)
+    if not isinstance(current, bool):
+        raise ValueError(f"{key} DC state is unknown")
+
+    LOG.info("DC reset %s: initial state=%s", key, current)
+    await state.device.enable_dc_12v_port(False)
+    await asyncio.sleep(delay_seconds)
+    await state.device.enable_dc_12v_port(True)
+    LOG.info("DC reset %s complete: final requested state=True", key)
+    return {
+        "status": "ok",
+        "device": key,
+        "control": "dc_12v_port_reset",
+        "initial_state": current,
+        "off_seconds": delay_seconds,
+        "final_requested": True,
+    }
+
+
 def telemetry_snapshot(
     states: list[DeviceState], stale_seconds: int, poll_seconds: int
 ) -> dict[str, Any]:
     return {
         "service": "UPSflow",
-        "read_only": True,
+        "read_only": False,
         "poll_seconds": poll_seconds,
         "stale_seconds": stale_seconds,
         "devices": {state.key: telemetry_device(state, stale_seconds) for state in states},
@@ -471,6 +501,24 @@ async def handle_http_client(
             await http_response(writer, 200, telemetry_snapshot(states, stale_seconds, poll_seconds))
         elif method == "GET" and target == "/":
             await http_response(writer, 200, DASHBOARD_HTML, "text/html")
+        elif method == "POST" and target.startswith("/v1/devices/") and target.endswith("/dc/reset"):
+            key = target[len("/v1/devices/"):-len("/dc/reset")].strip("/")
+            if not key:
+                await http_response(writer, 400, {"status": "error", "detail": "device key required"})
+                return
+            try:
+                async with CONTROL_LOCK:
+                    result = await reset_dc_port(states, key)
+                await http_response(writer, 200, result)
+            except KeyError as exc:
+                await http_response(writer, 404, {"status": "error", "detail": str(exc)})
+            except ConnectionError as exc:
+                await http_response(writer, 409, {"status": "error", "detail": str(exc)})
+            except ValueError as exc:
+                await http_response(writer, 409, {"status": "error", "detail": str(exc)})
+            except Exception as exc:
+                LOG.exception("DC reset failed for %s", key)
+                await http_response(writer, 500, {"status": "error", "detail": f"{type(exc).__name__}: {exc}"})
         elif method == "POST" and target.startswith("/v1/devices/") and target.endswith("/dc"):
             key = target[len("/v1/devices/"):-len("/dc")].strip("/")
             if not key:
