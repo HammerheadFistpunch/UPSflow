@@ -466,9 +466,24 @@ const esc=s=>String(s??"—");
 const rawLabels={battery_level:"Battery level",input_power:"Total input power",output_power:"Total output power",cell_temperature:"Cell temperature",ac_input_power:"AC input power",ac_output_power:"AC output power",ac_input_voltage:"AC input voltage",ac_input_current:"AC input current",ac_ports:"AC ports",ac_xboost:"AC X-Boost",ac_charging_speed:"AC charging speed",ac_charging_power_min:"AC charging power min",ac_charging_power_max:"AC charging power max",dc_port_input_power:"DC input power",solar_input_power:"Solar input power",car_input_power:"Car input power",dc_mode:"DC mode",dc_12v_port:"12V DC port",dc12v_output_power:"12V output power",dc_charging_max_amps:"DC charging max amps",dc_charging_current_max:"DC charging current max",usbc_output_power:"USB-C output power",usba_output_power:"USB-A output power",energy_backup:"Energy backup",energy_backup_battery_level:"Energy backup battery level",battery_charge_limit_min:"Battery charge limit min",battery_charge_limit_max:"Battery charge limit max",remaining_time_charging:"Remaining charging time",remaining_time_discharging:"Remaining discharging time"};
 function rawValue(name,v){if(v==null)return"—";if(typeof v==="number"){if(name.includes("temperature")||name.includes("voltage")||name.includes("current")||name.includes("amps"))return v.toFixed(2);if(name.includes("power"))return Math.round(v)+" W";if(name==="battery_level")return Number(v).toFixed(1)+"%";return String(v)}if(typeof v==="object")return JSON.stringify(v);return String(v)}
 function rawRows(d){return Object.entries(d.raw_telemetry||{}).map(([n,v])=>'<div class="row"><span class="label">'+esc(rawLabels[n]||n)+'</span><span class="value">'+esc(rawValue(n,v))+'</span></div>').join("")}
+function formatRemainingTime(seconds){
+ const totalMinutes=Math.max(0,Math.round(Number(seconds)/60));
+ const hours=Math.floor(totalMinutes/60);
+ const minutes=totalMinutes%60;
+ return String(hours).padStart(2,"0")+":"+String(minutes).padStart(2,"0");
+}
+function remainingTimeRow(d,net){
+ const raw=d.raw_telemetry||{};
+ const charging=raw.remaining_time_charging;
+ const discharging=raw.remaining_time_discharging;
+ if(net>0 && charging!=null && Number(charging)>0)
+   return '<div class="row"><span class="label">Time to charge</span><span class="value positive">+'+formatRemainingTime(charging)+'</span></div>';
+ if(net<0 && discharging!=null && Number(discharging)>0)
+   return '<div class="row"><span class="label">Time to discharge</span><span class="value negative">-'+formatRemainingTime(discharging)+'</span></div>';
+ return '<div class="row"><span class="label">Time remaining</span><span class="value">—</span></div>';
+}
 function card(key,d){
  const connected=d.connected?'<span class="ok">Connected</span>':'<span>Disconnected</span>',ac=d.ac_present?'<span class="ok">YES</span>':'<span>NO</span>',net=Number(d.net_watts||0),nc=net>=0?"positive":"negative";
- const age=d.stale?'<span class="stale">STALE</span>':d.telemetry_age_seconds==null?"Never":Math.round(d.telemetry_age_seconds)+"s ago";
  const err=d.error?'<div class="row"><span class="label">Error</span><span class="value error">'+esc(d.error)+'</span></div>':"";
  return '<section class="card"><h2>'+esc(key).toUpperCase()+'</h2>'+
  '<div class="row"><span class="label">BLE</span><span class="value">'+connected+'</span></div>'+
@@ -482,7 +497,7 @@ function card(key,d){
  '<div class="row"><span class="label">USB out</span><span class="value">'+Math.round(d.usb_output_watts||0)+' W</span></div>'+
  '<div class="row"><span class="label">Total Output</span><span class="value">'+Math.round(d.output_watts||0)+' W</span></div>'+
  '<div class="row"><span class="label">Net power</span><span class="value '+nc+'">'+(net>=0?"+":"")+Math.round(net)+' W</span></div>'+
- '<div class="row"><span class="label">Telemetry</span><span class="value">'+age+'</span></div>'+err+
+ remainingTimeRow(d,net)+err+
  '<details><summary>Show more</summary><div class="raw">'+
  '<div class="row"><span class="label">Name</span><span class="value">'+esc(d.name)+'</span></div>'+
  '<div class="row"><span class="label">Serial number</span><span class="value">'+esc(d.serial_number)+'</span></div>'+
