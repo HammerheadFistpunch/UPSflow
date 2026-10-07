@@ -208,3 +208,24 @@ The reset endpoint fails closed if the current DC state cannot be determined and
 ## Control boundary
 
 UPSflow owns EcoFlow control operations exposed through its local API. Keymaster does not implement or time EcoFlow control operations. The controls page/API currently mirrors the actual write methods available in the pinned River 2 implementation.
+
+## Verified power commands
+
+`POST /v1/devices/{key}/power` accepts JSON such as
+`{"subsystem":"ac","action":"CYCLE"}`. Subsystems: `ac`, `dc` (12V),
+`reserve` (Energy Backup). Actions: `STATE`, `ON`, `OFF`, `CYCLE`, `RESET`.
+RESET aliases CYCLE. Only configured device keys are accepted.
+
+STATE requires fresh subsystem telemetry and returns `verified` and `final_state`.
+ON/OFF require a new heartbeat for that subsystem after the write. CYCLE confirms
+ON (enabling first if OFF), confirms OFF, waits five seconds, and confirms ON;
+success includes `cycle_confirmed: true`. Unknown, stale, disconnected, or rejected
+states fail. An OFF-step failure attempts ON restoration and still reports failure.
+A final ON failure is reported as unconfirmed. Concurrent controls are serialized.
+Reserve toggles preserve the existing percentage and reject unknown percentages.
+
+The local controls page adds CYCLE beside AC, DC, and Energy Backup. Their ON/OFF
+buttons use the verified endpoint too. Existing `/dc` and `/dc/reset` endpoints
+remain available with verified behavior. Update UPSflow before the PWR client.
+
+Run offline control tests with `python -m pytest -q test_power_control.py`.

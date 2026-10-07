@@ -7,9 +7,11 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from power_control import execute_power, power_state
 
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
@@ -66,6 +68,7 @@ class DeviceState:
     device: UPSFlowRiver2
     last_update: float = 0.0
     last_error: str | None = None
+    power_updates: dict[str, float] = field(default_factory=dict)
 
     @property
     def stale(self) -> bool:
@@ -128,7 +131,14 @@ async def connect_device(
 
         parser = eflib.get_fixed_length_coding_device(state.device)
         if parser is not None:
-            parser.on_message_processed(lambda _message: setattr(state, "last_update", time.monotonic()))
+            def record_telemetry(message):
+                now = time.monotonic()
+                state.last_update = now
+                if isinstance(message, river2.Mr330MpptHeart):
+                    state.power_updates.update(ac=now, dc=now)
+                elif isinstance(message, river2.DirectPdHeartbeatPack):
+                    state.power_updates["reserve"] = now
+            parser.on_message_processed(record_telemetry)
 
     except Exception as exc:
         state.last_error = f"{type(exc).__name__}: {exc}"
@@ -289,6 +299,8 @@ def telemetry_device(state: DeviceState, stale_seconds: int) -> dict[str, Any]:
         "dc_state": dc_mode,
         "dc_12v_port_on": dc_12v_on,
         "dc_enabled": dc_12v_on,
+        "ac_enabled": power_state(d, "ac"),
+        "reserve_enabled": power_state(d, "reserve"),
         "total_input_watts": total_in,
         "dc12v_output_watts": dc12_w,
         "usba_output_watts": usba_w,
@@ -315,13 +327,7 @@ async def control_dc_port(
         raise KeyError(f"device not configured: {key}")
     if not state.device.is_connected:
         raise ConnectionError(f"{key} is not connected")
-    await state.device.enable_dc_12v_port(enabled)
-    return {
-        "status": "ok",
-        "device": key,
-        "control": "dc_12v_port",
-        "requested": enabled,
-    }
+    return await execute_power(state, "dc", "ON" if enabled else "OFF")
 
 
 async def apply_control(
@@ -370,6 +376,9 @@ async def apply_control(
     if control == "dc_mode":
         converted = river2.DCMode[converted]
 
+    if control in {"ac", "dc", "energy_backup"}:
+        subsystem = "reserve" if control == "energy_backup" else control
+        return await execute_power(state, subsystem, "ON" if converted else "OFF")
     result = await getattr(state.device, method_name)(converted)
     if result is False:
         raise ValueError(f"{control} rejected by device constraints")
@@ -381,19 +390,6 @@ async def apply_control(
     }
 
 
-async def wait_for_dc_state(
-    state: DeviceState, expected: bool, timeout_seconds: float = 10.0
-) -> bool:
-    """Wait for the device's native DC state to reflect an expected value."""
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        current = dc_12v_state(state.device)
-        if current is expected:
-            return True
-        await asyncio.sleep(0.25)
-    return False
-
-
 async def reset_dc_port(
     states: list[DeviceState], key: str, delay_seconds: float = 5.0
 ) -> dict[str, Any]:
@@ -401,35 +397,7 @@ async def reset_dc_port(
     state = find_device(states, key)
     if state is None:
         raise KeyError(f"device not configured: {key}")
-    if not state.device.is_connected:
-        raise ConnectionError(f"{key} is not connected")
-    if state.stale:
-        raise ValueError(f"{key} DC telemetry is stale")
-
-    current = dc_12v_state(state.device)
-    if current is None:
-        raise ValueError(f"{key} DC state is unknown")
-
-    LOG.info("DC reset %s: initial state=%s", key, current)
-    await state.device.enable_dc_12v_port(False)
-    if not await wait_for_dc_state(state, False):
-        raise RuntimeError(f"{key} DC OFF state was not confirmed")
-
-    await asyncio.sleep(delay_seconds)
-
-    await state.device.enable_dc_12v_port(True)
-    if not await wait_for_dc_state(state, True):
-        raise RuntimeError(f"{key} DC ON state was not confirmed")
-
-    LOG.info("DC reset %s complete: initial=%s final=True", key, current)
-    return {
-        "status": "ok",
-        "device": key,
-        "control": "dc_12v_port_reset",
-        "initial_state": current,
-        "off_seconds": delay_seconds,
-        "final_state": True,
-    }
+    return await execute_power(state, "dc", "CYCLE", delay_seconds)
 
 
 def telemetry_snapshot(
@@ -596,6 +564,12 @@ function makeControl(key, d, control, name, desc, type) {
     off.textContent = "OFF";
     off.onclick = () => setControl(key, control, false);
     row.append(on, off);
+    if (["ac","dc","energy_backup"].includes(control)) {
+      const cycle = document.createElement("button");
+      cycle.textContent = "CYCLE";
+      cycle.onclick = () => setControl(key, control, "CYCLE");
+      row.appendChild(cycle);
+    }
   } else if (type === "mode") {
     const select = document.createElement("select");
     ["AUTO","SOLAR","CAR"].forEach((mode) => {
@@ -717,10 +691,14 @@ async function load() {
 }
 
 async function postControl(key, control, value) {
-  const response = await fetch("/v1/devices/" + encodeURIComponent(key) + "/control", {
+  const verified = ["ac","dc","energy_backup"].includes(control);
+  const body = verified
+    ? {subsystem:control === "energy_backup" ? "reserve" : control, action:value === "CYCLE" ? "CYCLE" : value ? "ON" : "OFF"}
+    : {control:control,value:value};
+  const response = await fetch("/v1/devices/" + encodeURIComponent(key) + (verified ? "/power" : "/control"), {
     method:"POST",
     headers:{"Content-Type":"application/json","Accept":"application/json"},
-    body:JSON.stringify({control:control,value:value})
+    body:JSON.stringify(body)
   });
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.detail || ("HTTP " + response.status));
@@ -732,9 +710,9 @@ async function setControl(key, control, value) {
   status.className = "";
   status.textContent = "Sending " + control + " to " + key.toUpperCase() + "…";
   try {
-    await postControl(key, control, value);
+    const result = await postControl(key, control, value);
     status.className = "ok";
-    status.textContent = control + " command sent; waiting for telemetry…";
+    status.textContent = result.verified ? control + " " + (value === "CYCLE" ? "cycle verified; ON" : result.final_state ? "ON verified" : "OFF verified") : control + " command sent; waiting for telemetry…";
     setTimeout(load, 500);
   } catch (error) {
     status.className = "error";
@@ -804,6 +782,34 @@ async def handle_http_client(
             await http_response(writer, 200, DASHBOARD_HTML, "text/html")
         elif method == "GET" and target == "/controls":
             await http_response(writer, 200, CONTROLS_HTML, "text/html")
+        elif method == "POST" and target.startswith("/v1/devices/") and target.endswith("/power"):
+            key = target[len("/v1/devices/"):-len("/power")].strip("/")
+            try:
+                length = int(headers.get("content-length", "0"))
+                if not 0 < length <= 1024:
+                    raise ValueError("request body required (max 1024 bytes)")
+                body = await asyncio.wait_for(reader.readexactly(length), timeout=2)
+                payload = json.loads(body)
+                subsystem, action = payload["subsystem"], payload["action"]
+                if not isinstance(subsystem, str) or not isinstance(action, str):
+                    raise ValueError("subsystem and action must be strings")
+            except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
+                await http_response(writer, 400, {"status": "error", "detail": str(exc)})
+                return
+            try:
+                async with CONTROL_LOCK:
+                    state = find_device(states, key)
+                    if state is None:
+                        raise KeyError(f"device not configured: {key}")
+                    result = await execute_power(state, subsystem, action)
+                await http_response(writer, 200, result)
+            except KeyError as exc:
+                await http_response(writer, 404, {"status": "error", "detail": str(exc)})
+            except (ConnectionError, ValueError, RuntimeError) as exc:
+                await http_response(writer, 409, {"status": "error", "detail": str(exc)})
+            except Exception as exc:
+                LOG.exception("Power control failed for %s", key)
+                await http_response(writer, 500, {"status": "error", "detail": str(exc)})
         elif method == "POST" and target.startswith("/v1/devices/") and target.endswith("/control"):
             key = target[len("/v1/devices/"):-len("/control")].strip("/")
             if not key:
