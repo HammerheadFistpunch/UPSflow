@@ -735,16 +735,19 @@ async def http_response(
     status: int,
     payload: dict[str, Any] | str,
     content_type: str = "application/json",
+    filename: str | None = None,
 ) -> None:
     if isinstance(payload, str):
         body = payload.encode("utf-8")
     else:
         body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     reason = {200: "OK", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed", 409: "Conflict", 500: "Internal Server Error"}.get(status, "Error")
+    attachment = f'Content-Disposition: attachment; filename="{filename}"\r\n' if filename else ""
     headers = (
         f"HTTP/1.1 {status} {reason}\r\n"
         f"Content-Type: {content_type}; charset=utf-8\r\n"
         f"Content-Length: {len(body)}\r\n"
+        f"{attachment}"
         "Cache-Control: no-store\r\n"
         "Connection: close\r\n\r\n"
     ).encode("ascii")
@@ -788,20 +791,24 @@ async def handle_http_client(
         elif method == "GET" and target == "/history":
             page = Path(__file__).with_name("history.html")
             await http_response(writer, 200, page.read_text(encoding="utf-8"), "text/html")
-        elif method == "GET" and target == "/v1/history":
+        elif method == "GET" and target in {"/v1/history", "/v1/history.csv"}:
             if history is None:
                 await http_response(writer, 404, {"detail": "Telemetry archival is disabled."})
                 return
             try:
                 query = parse_qs(query_string, max_num_fields=8)
-                result = await asyncio.to_thread(history.read, query)
+                export = target.endswith(".csv")
+                result = await asyncio.to_thread(history.export_csv if export else history.read, query)
             except ValueError as exc:
                 await http_response(writer, 400, {"detail": str(exc)})
             except (OSError, sqlite3.Error):
                 LOG.exception("Could not read telemetry history")
                 await http_response(writer, 500, {"detail": "Telemetry archive is unavailable."})
             else:
-                await http_response(writer, 200, result)
+                if export:
+                    await http_response(writer, 200, result, "text/csv", filename="upsflow-history.csv")
+                else:
+                    await http_response(writer, 200, result)
         elif method == "GET" and target == "/controls":
             await http_response(writer, 200, CONTROLS_HTML, "text/html")
         elif method == "POST" and target.startswith("/v1/devices/") and target.endswith("/power"):

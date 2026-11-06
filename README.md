@@ -119,6 +119,11 @@ as samples accumulate. Set `history_sample_seconds` in `config.json` to change
 the default 60-second interval (minimum 10 seconds), or set it to 0 to disable
 archival. Events shorter than the sample interval may fall between samples.
 
+**Export CSV** downloads the selected time range for both units, regardless of
+the chart reading selected. It includes one row per unit per snapshot, with UTC
+timestamps, connection and stale flags, power and battery readings, and raw
+telemetry in a JSON column.
+
 For archival access, `GET /v1/history` returns up to 500 full snapshots in archive
 order. Pass the returned `next_after` as `?after=<id>` for the next page.
 Timestamps are Unix milliseconds in UTC. The history API uses the same local

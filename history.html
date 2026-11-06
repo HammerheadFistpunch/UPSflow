@@ -8,7 +8,7 @@
 body{font:16px Segoe UI,Arial,sans-serif;margin:0;background:#f3f4f6;color:#17202a}
 main{max-width:1100px;margin:auto;padding:24px}
 h1{margin:0 0 16px}nav,.toolbar,.legend{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
-nav a,select{font:inherit;padding:8px 12px;border:1px solid #cfd5dc;border-radius:7px;background:white;color:#344054;text-decoration:none}
+nav a,select,.toolbar a{font:inherit;padding:8px 12px;border:1px solid #cfd5dc;border-radius:7px;background:white;color:#344054;text-decoration:none}
 nav .active{background:#344054;color:white}
 section{margin-top:20px;background:white;border:1px solid #d9dee5;border-radius:10px;padding:16px}
 svg{display:block;width:100%;height:auto;margin-top:14px;color:#344054}
@@ -36,6 +36,7 @@ svg{display:block;width:100%;height:auto;margin-top:14px;color:#344054}
 <option value="24" selected>Last 24 hours</option>
 <option value="168">Last 7 days</option>
 </select></label>
+<a id="export" href="/v1/history.csv?hours=24">Export CSV</a>
 </div>
 <svg id="plot" viewBox="0 0 900 350" role="img" aria-label="Server and network UPS telemetry over time"></svg>
 <div class="legend"><strong class="server">● Server</strong><strong class="network">● Network</strong></div>
@@ -45,6 +46,7 @@ svg{display:block;width:100%;height:auto;margin-top:14px;color:#344054}
 <script>
 const metric = document.getElementById("metric");
 const hours = document.getElementById("hours");
+const exportLink = document.getElementById("export");
 const plot = document.getElementById("plot");
 const status = document.getElementById("status");
 let request;
@@ -124,6 +126,7 @@ async function load() {
   const controller = new AbortController();
   request = controller;
   const reading = metric.value, range = Number(hours.value);
+  exportLink.href = `/v1/history.csv?hours=${range}`;
   try {
     const response = await fetch(`/v1/history?metric=${reading}&hours=${range}`, {signal:controller.signal});
     const data = await response.json();
