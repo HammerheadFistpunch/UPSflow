@@ -5,13 +5,16 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
 from power_control import execute_power, power_state
+from telemetry_history import TelemetryHistory
 
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
@@ -427,7 +430,7 @@ details{margin-top:14px;border-top:1px solid #eee;padding-top:10px}summary{curso
 footer{margin-top:18px;color:#667085;font-size:13px}
 </style></head><body><main>
 <h1>UPSflow</h1><div class="sub">EcoFlow River 2 telemetry and local monitoring</div>
-<nav><a class="active" href="/">Monitor</a><a href="/controls">Controls / Test</a></nav>
+<nav><a class="active" href="/">Monitor</a><a href="/controls">Controls / Test</a><a href="/history">History</a></nav>
 <div id="grid" class="grid"></div><footer id="status">Loading…</footer>
 </main><script>
 const esc=s=>String(s??"—");
@@ -496,7 +499,7 @@ button,input,select{font:inherit}button{padding:9px 13px;font-weight:600;cursor:
 input,select{padding:8px;border:1px solid #cfd5dc;border-radius:6px}.note{color:#667085;font-size:13px;margin-top:8px}
 #status{color:#667085;font-size:13px}.error{color:#b42318}.ok{color:#067647}
 </style></head><body><main><h1>UPSflow</h1><div class="sub">EcoFlow River 2 controls</div>
-<nav><a href="/">Monitor</a><a class="active" href="/controls">Controls</a></nav><div id="devices"></div><div id="status">Loading…</div>
+<nav><a href="/">Monitor</a><a class="active" href="/controls">Controls</a><a href="/history">History</a></nav><div id="devices"></div><div id="status">Loading…</div>
 <script>
 const esc = (s) => String(s == null ? "—" : s);
 const controls = [
@@ -757,6 +760,7 @@ async def handle_http_client(
     states: list[DeviceState],
     stale_seconds: int,
     poll_seconds: int,
+    history: TelemetryHistory | None = None,
 ) -> None:
     try:
         request_line = await asyncio.wait_for(reader.readline(), timeout=2.0)
@@ -764,7 +768,8 @@ async def handle_http_client(
         if len(parts) < 2:
             await http_response(writer, 405, {"status": "error", "detail": "invalid request"})
             return
-        method, target = parts[0].upper(), parts[1].split("?", 1)[0]
+        method = parts[0].upper()
+        target, _, query_string = parts[1].partition("?")
         headers: dict[str, str] = {}
         while True:
             line = await asyncio.wait_for(reader.readline(), timeout=2.0)
@@ -780,6 +785,23 @@ async def handle_http_client(
             await http_response(writer, 200, telemetry_snapshot(states, stale_seconds, poll_seconds))
         elif method == "GET" and target == "/":
             await http_response(writer, 200, DASHBOARD_HTML, "text/html")
+        elif method == "GET" and target == "/history":
+            page = Path(__file__).with_name("history.html")
+            await http_response(writer, 200, page.read_text(encoding="utf-8"), "text/html")
+        elif method == "GET" and target == "/v1/history":
+            if history is None:
+                await http_response(writer, 404, {"detail": "Telemetry archival is disabled."})
+                return
+            try:
+                query = parse_qs(query_string, max_num_fields=8)
+                result = await asyncio.to_thread(history.read, query)
+            except ValueError as exc:
+                await http_response(writer, 400, {"detail": str(exc)})
+            except (OSError, sqlite3.Error):
+                LOG.exception("Could not read telemetry history")
+                await http_response(writer, 500, {"detail": "Telemetry archive is unavailable."})
+            else:
+                await http_response(writer, 200, result)
         elif method == "GET" and target == "/controls":
             await http_response(writer, 200, CONTROLS_HTML, "text/html")
         elif method == "POST" and target.startswith("/v1/devices/") and target.endswith("/power"):
@@ -911,6 +933,24 @@ async def handle_http_client(
             writer.close()
 
 
+async def archive_telemetry(
+    history: TelemetryHistory, states: list[DeviceState], stale_seconds: int, poll_seconds: int
+) -> None:
+    while True:
+        started = time.monotonic()
+        try:
+            timestamp_ms = time.time_ns() // 1_000_000
+            snapshot = telemetry_snapshot(states, stale_seconds, poll_seconds)
+            await asyncio.to_thread(history.append, timestamp_ms, snapshot)
+        except (OSError, sqlite3.Error, ValueError):
+            if not history.write_failed:
+                LOG.exception("Could not archive UPSflow telemetry")
+            history.write_failed = True
+        else:
+            history.write_failed = False
+        await asyncio.sleep(max(0, history.interval - (time.monotonic() - started)))
+
+
 async def monitor(config: dict[str, Any], config_path: Path) -> None:
     global CONFIG
     CONFIG = config
@@ -957,15 +997,24 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
     stale_seconds = max(poll_seconds * 2, int(config.get("stale_seconds", 15)))
     http_host = str(config.get("http_host", "0.0.0.0")).strip() or "0.0.0.0"
     http_port = max(1, int(config.get("http_port", 5005)))
+    history_interval = int(config.get("history_sample_seconds", 60))
+    history = (
+        TelemetryHistory(config_path.resolve().parent / "logs" / "telemetry.sqlite3", max(10, history_interval))
+        if history_interval > 0 else None
+    )
     http_server = await asyncio.start_server(
         lambda reader, writer: handle_http_client(
-            reader, writer, states, stale_seconds, poll_seconds
+            reader, writer, states, stale_seconds, poll_seconds, history
         ),
         http_host,
         http_port,
     )
     LOG.info("Telemetry API listening on %s:%d", http_host, http_port)
 
+    archive_task = (
+        asyncio.create_task(archive_telemetry(history, states, stale_seconds, poll_seconds))
+        if history is not None else None
+    )
     try:
         while True:
             print("\x1b[2J\x1b[H", end="")
@@ -982,6 +1031,9 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
     finally:
         http_server.close()
         await http_server.wait_closed()
+        if archive_task is not None:
+            archive_task.cancel()
+            await asyncio.gather(archive_task, return_exceptions=True)
         await asyncio.gather(
             *(state.device.disconnect() for state in states if state.device.is_connected),
             return_exceptions=True,

@@ -105,6 +105,26 @@ The existing endpoints remain available at `/health` and `/v1/telemetry`. The co
 
 The older Tkinter desktop viewer can still be run with `python upsflow_gui.py`, but the browser dashboard is the recommended local display.
 
+## Telemetry history
+
+Open **History** from the dashboard, or visit `http://localhost:5005/history`.
+The chart compares the Server and Network UPS units across the last hour, 6 hours,
+24 hours, or 7 days. Select a reading such as battery charge, utility AC presence,
+input power, or output power. Disconnected and stale samples appear as gaps.
+
+UPSflow saves full timestamped telemetry snapshots, including raw fields and
+connection status, in `logs/telemetry.sqlite3` beside the active configuration
+file. The archive survives restarts and does not expire automatically. It grows
+as samples accumulate. Set `history_sample_seconds` in `config.json` to change
+the default 60-second interval (minimum 10 seconds), or set it to 0 to disable
+archival. Events shorter than the sample interval may fall between samples.
+
+For archival access, `GET /v1/history` returns up to 500 full snapshots in archive
+order. Pass the returned `next_after` as `?after=<id>` for the next page.
+Timestamps are Unix milliseconds in UTC. The history API uses the same local
+HTTP listener as live telemetry. For a consistent file backup, stop UPSflow
+before copying the SQLite database, then restart it.
+
 ## Windows service with NSSM
 
 The recommended service arrangement is:
@@ -136,11 +156,7 @@ Start-Service UPSflow
 Get-Service UPSflow
 ```
 
-The service is configured for automatic startup and automatic restart after an unexpected process exit. Its Python console refresh output is discarded because the GUI provides the human-readable display. Python logging is retained in:
-
-```text
-logs\service-error.log
-```
+The service is configured for automatic startup and automatic restart after an unexpected process exit. The installer discards the service's console output. The telemetry archive is written by UPSflow directly, so it works under NSSM and when running the monitor interactively.
 
 ### Moving UPSflow
 

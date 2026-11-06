@@ -1,6 +1,7 @@
 {
   "user_id": "YOUR_ECOFLOW_USER_ID",
   "poll_seconds": 2,
+  "history_sample_seconds": 60,
   "ac_present_voltage": 80.0,
   "stale_seconds": 15,
   "http_host": "0.0.0.0",

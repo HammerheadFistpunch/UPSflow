@@ -53,7 +53,7 @@ $PSNativeCommandUseErrorActionPreference = $prevNativeEAP
 & $NssmPath set $ServiceName AppExit Default Restart
 & $NssmPath set $ServiceName AppRestartDelay 5000
 
-# Service output is intentionally discarded; UPSflow does not write runtime log files.
+# Console output is discarded; UPSflow writes telemetry history directly to SQLite.
 & $NssmPath set $ServiceName AppStdout NUL
 & $NssmPath set $ServiceName AppStderr NUL
 

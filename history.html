@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UPSflow History</title>
+<style>
+body{font:16px Segoe UI,Arial,sans-serif;margin:0;background:#f3f4f6;color:#17202a}
+main{max-width:1100px;margin:auto;padding:24px}
+h1{margin:0 0 16px}nav,.toolbar,.legend{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+nav a,select{font:inherit;padding:8px 12px;border:1px solid #cfd5dc;border-radius:7px;background:white;color:#344054;text-decoration:none}
+nav .active{background:#344054;color:white}
+section{margin-top:20px;background:white;border:1px solid #d9dee5;border-radius:10px;padding:16px}
+svg{display:block;width:100%;height:auto;margin-top:14px;color:#344054}
+#status{color:#475467;min-height:1.3em}.server{color:#175cd3}.network{color:#a33b08}
+</style>
+</head>
+<body><main>
+<h1>UPSflow History</h1>
+<nav><a href="/">Monitor</a><a href="/controls">Controls</a><a class="active" aria-current="page" href="/history">History</a></nav>
+<section aria-label="Telemetry chart">
+<div class="toolbar">
+<label>Reading <select id="metric">
+<option value="battery_percent">Battery (%)</option>
+<option value="ac_present">Utility AC</option>
+<option value="ac_voltage">AC input (V)</option>
+<option value="ac_watts">AC input (W)</option>
+<option value="dc_in_watts">DC input (W)</option>
+<option value="total_input_watts">Total input (W)</option>
+<option value="output_watts">Total output (W)</option>
+<option value="net_watts">Net power (W)</option>
+</select></label>
+<label>Range <select id="hours">
+<option value="1">Last hour</option>
+<option value="6">Last 6 hours</option>
+<option value="24" selected>Last 24 hours</option>
+<option value="168">Last 7 days</option>
+</select></label>
+</div>
+<svg id="plot" viewBox="0 0 900 350" role="img" aria-label="Server and network UPS telemetry over time"></svg>
+<div class="legend"><strong class="server">● Server</strong><strong class="network">● Network</strong></div>
+<p id="status" role="status">Loading history…</p>
+</section>
+</main>
+<script>
+const metric = document.getElementById("metric");
+const hours = document.getElementById("hours");
+const plot = document.getElementById("plot");
+const status = document.getElementById("status");
+let request;
+
+function draw(data, reading, range) {
+  plot.replaceChildren();
+  const samples = data.samples;
+  const ac = reading === "ac_present";
+  const fixedScale = ac || reading === "battery_percent";
+  let low = 0;
+  let high = fixedScale ? (ac ? 1 : 100) : 1;
+  let usable = false;
+  for (const [, server, network] of samples) {
+    for (const value of [server, network]) {
+      if (!Number.isFinite(value)) continue;
+      usable = true;
+      if (!fixedScale) {
+        low = Math.min(low, value);
+        high = Math.max(high, value);
+      }
+    }
+  }
+  const left = 55, right = 873, top = 20, bottom = 312;
+  const x = time => left + (time - data.start_ms) / (data.end_ms - data.start_ms) * (right - left);
+  const y = value => bottom - (value - low) / (high - low) * (bottom - top);
+  function add(tag, attrs, label) {
+    const element = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [key, value] of Object.entries(attrs)) element.setAttribute(key, value);
+    if (label !== undefined) element.textContent = label;
+    plot.append(element);
+  }
+  const ticks = ac ? 1 : 4;
+  for (let index = 0; index <= ticks; index++) {
+    const value = low + (high - low) * index / ticks;
+    const yy = y(value);
+    add("line", {x1:left, y1:yy, x2:right, y2:yy, stroke:"#d9dee5"});
+    add("text", {x:left - 8, y:yy + 5, "text-anchor":"end", fill:"currentColor"},
+        ac ? (value ? "On" : "Off") : value.toLocaleString(undefined, {maximumFractionDigits:1}));
+  }
+  const format = new Intl.DateTimeFormat(undefined, {
+    ...(range >= 24 ? {month:"short", day:"numeric"} : {}), hour:"numeric", minute:"2-digit"
+  });
+  for (let index = 0; index <= 4; index++) {
+    const time = data.start_ms + (data.end_ms - data.start_ms) * index / 4;
+    add("text", {x:x(time), y:bottom + 25, "text-anchor":index === 4 ? "end" : index === 0 ? "start" : "middle", fill:"currentColor"},
+        format.format(time));
+  }
+  for (const [column, color] of [[1, "#175cd3"], [2, "#a33b08"]]) {
+    const path = [];
+    let previous = null;
+    for (const row of samples) {
+      const time = row[0];
+      const value = row[column];
+      if (!Number.isFinite(value)) {
+        previous = null;
+        continue;
+      }
+      const xx = x(time).toFixed(2), yy = y(value).toFixed(2);
+      if (previous === null || time - previous > data.interval_seconds * 1500) {
+        // A short round-capped segment also shows isolated samples.
+        path.push(`M${xx},${yy}h0.01`);
+      } else {
+        path.push(ac ? `H${xx}V${yy}` : `L${xx},${yy}`);
+      }
+      previous = time;
+    }
+    add("path", {d:path.join(" "), fill:"none", stroke:color, "stroke-width":2, "stroke-linecap":"round"});
+  }
+  const summary = usable
+    ? `${samples.length.toLocaleString()} snapshots · sampled every ${data.interval_seconds}s · gaps indicate missing or stale readings`
+    : "No usable readings in this range yet.";
+  status.textContent = (data.write_failed ? "Archive writes are failing. " : "") + summary;
+}
+
+async function load() {
+  request?.abort();
+  const controller = new AbortController();
+  request = controller;
+  const reading = metric.value, range = Number(hours.value);
+  try {
+    const response = await fetch(`/v1/history?metric=${reading}&hours=${range}`, {signal:controller.signal});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail);
+    if (!controller.signal.aborted) draw(data, reading, range);
+  } catch (error) {
+    if (controller.signal.aborted) return;
+    plot.replaceChildren();
+    status.textContent = error.message || "Could not load history.";
+  }
+}
+for (const field of [metric, hours]) field.addEventListener("change", load);
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>
