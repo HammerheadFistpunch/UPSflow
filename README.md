@@ -108,9 +108,10 @@ The older Tkinter desktop viewer can still be run with `python upsflow_gui.py`, 
 ## Telemetry history
 
 Open **History** from the dashboard, or visit `http://localhost:5005/history`.
-The chart compares the Server and Network UPS units across the last hour, 6 hours,
-24 hours, or 7 days. Select a reading such as battery charge, utility AC presence,
-input power, or output power. Disconnected and stale samples appear as gaps.
+The chart compares the Server and Network UPS units over ranges from 15 minutes
+to 7 days. Readings include AC output and combined USB-A and USB-C output in watts.
+Hover or tap the chart to see the nearest recorded sample time and both units’
+values. Disconnected and stale samples appear as gaps.
 
 UPSflow saves full timestamped telemetry snapshots, including raw fields and
 connection status, in `logs/telemetry.sqlite3` beside the active configuration

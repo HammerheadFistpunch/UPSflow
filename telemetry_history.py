@@ -10,7 +10,7 @@ from pathlib import Path
 
 METRICS = {
     "battery_percent", "ac_present", "ac_voltage", "ac_watts", "dc_in_watts",
-    "total_input_watts", "output_watts", "net_watts",
+    "total_input_watts", "output_watts", "net_watts", "ac_output_watts", "usb_output_watts",
 }
 
 
@@ -27,8 +27,11 @@ def history_window(query: dict[str, list[str]]) -> tuple[int, int]:
     hours = int(query.get("hours", ["24"])[0])
     if not 1 <= hours <= 168:
         raise ValueError("hours must be 1–168")
+    minutes = int(query.get("minutes", [str(hours * 60)])[0])
+    if not 1 <= minutes <= 168 * 60:
+        raise ValueError("minutes must be 1–10080")
     end = time.time_ns() // 1_000_000
-    return end - hours * 3_600_000, end
+    return end - minutes * 60_000, end
 
 
 class TelemetryHistory:

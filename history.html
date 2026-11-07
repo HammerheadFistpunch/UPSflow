@@ -12,6 +12,7 @@ nav a,select,.toolbar a{font:inherit;padding:8px 12px;border:1px solid #cfd5dc;b
 nav .active{background:#344054;color:white}
 section{margin-top:20px;background:white;border:1px solid #d9dee5;border-radius:10px;padding:16px}
 svg{display:block;width:100%;height:auto;margin-top:14px;color:#344054}
+#sample{min-height:1.3em;color:#344054;font-variant-numeric:tabular-nums}
 #status{color:#475467;min-height:1.3em}.server{color:#175cd3}.network{color:#a33b08}
 </style>
 </head>
@@ -22,48 +23,52 @@ svg{display:block;width:100%;height:auto;margin-top:14px;color:#344054}
 <div class="toolbar">
 <label>Reading <select id="metric">
 <option value="battery_percent">Battery (%)</option>
-<option value="ac_present">Utility AC</option>
-<option value="ac_voltage">AC input (V)</option>
 <option value="ac_watts">AC input (W)</option>
 <option value="dc_in_watts">DC input (W)</option>
 <option value="total_input_watts">Total input (W)</option>
+<option value="ac_output_watts">AC output (W)</option>
+<option value="usb_output_watts">USB output (W)</option>
 <option value="output_watts">Total output (W)</option>
 <option value="net_watts">Net power (W)</option>
 </select></label>
-<label>Range <select id="hours">
-<option value="1">Last hour</option>
-<option value="6">Last 6 hours</option>
-<option value="24" selected>Last 24 hours</option>
-<option value="168">Last 7 days</option>
+<label>Range <select id="range">
+<option value="15">Last 15 minutes</option>
+<option value="30">Last 30 minutes</option>
+<option value="60">Last hour</option>
+<option value="360">Last 6 hours</option>
+<option value="1440" selected>Last 24 hours</option>
+<option value="10080">Last 7 days</option>
 </select></label>
 <a id="export" href="/v1/history.csv?hours=24">Export CSV</a>
 </div>
 <svg id="plot" viewBox="0 0 900 350" role="img" aria-label="Server and network UPS telemetry over time"></svg>
 <div class="legend"><strong class="server">● Server</strong><strong class="network">● Network</strong></div>
+<p id="sample">Hover or tap the chart to inspect a sample.</p>
 <p id="status" role="status">Loading history…</p>
 </section>
 </main>
 <script>
 const metric = document.getElementById("metric");
-const hours = document.getElementById("hours");
+const rangeSelect = document.getElementById("range");
 const exportLink = document.getElementById("export");
 const plot = document.getElementById("plot");
 const status = document.getElementById("status");
+const sample = document.getElementById("sample");
+const inspectHint = sample.textContent;
 let request;
 
 function draw(data, reading, range) {
   plot.replaceChildren();
   const samples = data.samples;
-  const ac = reading === "ac_present";
-  const fixedScale = ac || reading === "battery_percent";
+  const battery = reading === "battery_percent";
   let low = 0;
-  let high = fixedScale ? (ac ? 1 : 100) : 1;
+  let high = battery ? 100 : 1;
   let usable = false;
   for (const [, server, network] of samples) {
     for (const value of [server, network]) {
       if (!Number.isFinite(value)) continue;
       usable = true;
-      if (!fixedScale) {
+      if (!battery) {
         low = Math.min(low, value);
         high = Math.max(high, value);
       }
@@ -77,29 +82,31 @@ function draw(data, reading, range) {
     for (const [key, value] of Object.entries(attrs)) element.setAttribute(key, value);
     if (label !== undefined) element.textContent = label;
     plot.append(element);
+    return element;
   }
-  const ticks = ac ? 1 : 4;
+  const ticks = 4;
   for (let index = 0; index <= ticks; index++) {
     const value = low + (high - low) * index / ticks;
     const yy = y(value);
     add("line", {x1:left, y1:yy, x2:right, y2:yy, stroke:"#d9dee5"});
     add("text", {x:left - 8, y:yy + 5, "text-anchor":"end", fill:"currentColor"},
-        ac ? (value ? "On" : "Off") : value.toLocaleString(undefined, {maximumFractionDigits:1}));
+        value.toLocaleString(undefined, {maximumFractionDigits:1}));
   }
   const format = new Intl.DateTimeFormat(undefined, {
-    ...(range >= 24 ? {month:"short", day:"numeric"} : {}), hour:"numeric", minute:"2-digit"
+    ...(range >= 1440 ? {month:"short", day:"numeric"} : {}), hour:"numeric", minute:"2-digit"
   });
   for (let index = 0; index <= 4; index++) {
     const time = data.start_ms + (data.end_ms - data.start_ms) * index / 4;
     add("text", {x:x(time), y:bottom + 25, "text-anchor":index === 4 ? "end" : index === 0 ? "start" : "middle", fill:"currentColor"},
         format.format(time));
   }
-  for (const [column, color] of [[1, "#175cd3"], [2, "#a33b08"]]) {
+  const colors = ["#175cd3", "#a33b08"];
+  for (const [index, color] of colors.entries()) {
     const path = [];
     let previous = null;
     for (const row of samples) {
       const time = row[0];
-      const value = row[column];
+      const value = row[index + 1];
       if (!Number.isFinite(value)) {
         previous = null;
         continue;
@@ -109,12 +116,69 @@ function draw(data, reading, range) {
         // A short round-capped segment also shows isolated samples.
         path.push(`M${xx},${yy}h0.01`);
       } else {
-        path.push(ac ? `H${xx}V${yy}` : `L${xx},${yy}`);
+        path.push(`L${xx},${yy}`);
       }
       previous = time;
     }
     add("path", {d:path.join(" "), fill:"none", stroke:color, "stroke-width":2, "stroke-linecap":"round"});
   }
+  const marker = add("g", {"pointer-events":"none", display:"none"});
+  const guide = add("line", {y1:top, y2:bottom, stroke:"#667085", "stroke-dasharray":"4 4"});
+  marker.append(guide);
+  const dots = colors.map(color => {
+    const dot = add("circle", {r:4, fill:color, stroke:"white"});
+    marker.append(dot);
+    return dot;
+  });
+  const sampleTime = new Intl.DateTimeFormat(undefined, {dateStyle:"medium", timeStyle:"medium"});
+  const unit = battery ? "%" : " W";
+  const describe = value => Number.isFinite(value) ? value + unit : "No reading";
+
+  function clearSample() {
+    marker.setAttribute("display", "none");
+    sample.textContent = inspectHint;
+  }
+
+  function inspect(event) {
+    const matrix = plot.getScreenCTM();
+    if (!matrix || !samples.length) return;
+    const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse());
+    if (point.x < left || point.x > right || point.y < top || point.y > bottom) {
+      clearSample();
+      return;
+    }
+    const time = data.start_ms + (point.x - left) / (right - left) * (data.end_ms - data.start_ms);
+    let first = 0, last = samples.length - 1;
+    while (first < last) {
+      const middle = Math.floor((first + last) / 2);
+      if (samples[middle][0] < time) first = middle + 1;
+      else last = middle;
+    }
+    if (first > 0 && Math.abs(samples[first - 1][0] - time) < Math.abs(samples[first][0] - time)) first--;
+    const [timestamp, server, network] = samples[first];
+    const xx = x(timestamp);
+    guide.setAttribute("x1", xx);
+    guide.setAttribute("x2", xx);
+    for (const [index, value] of [server, network].entries()) {
+      const dot = dots[index];
+      dot.setAttribute("visibility", Number.isFinite(value) ? "visible" : "hidden");
+      if (Number.isFinite(value)) {
+        dot.setAttribute("cx", xx);
+        dot.setAttribute("cy", y(value));
+      }
+    }
+    marker.removeAttribute("display");
+    sample.textContent = `${sampleTime.format(timestamp)} · Server ${describe(server)} · Network ${describe(network)}`;
+  }
+
+  clearSample();
+  plot.onpointermove = event => {
+    if (event.pointerType !== "touch") inspect(event);
+  };
+  plot.onclick = inspect;
+  plot.onpointerleave = event => {
+    if (event.pointerType !== "touch") clearSample();
+  };
   const summary = usable
     ? `${samples.length.toLocaleString()} snapshots · sampled every ${data.interval_seconds}s · gaps indicate missing or stale readings`
     : "No usable readings in this range yet.";
@@ -125,20 +189,22 @@ async function load() {
   request?.abort();
   const controller = new AbortController();
   request = controller;
-  const reading = metric.value, range = Number(hours.value);
-  exportLink.href = `/v1/history.csv?hours=${range}`;
+  const reading = metric.value, range = Number(rangeSelect.value);
+  exportLink.href = `/v1/history.csv?minutes=${range}`;
   try {
-    const response = await fetch(`/v1/history?metric=${reading}&hours=${range}`, {signal:controller.signal});
+    const response = await fetch(`/v1/history?metric=${reading}&minutes=${range}`, {signal:controller.signal});
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail);
     if (!controller.signal.aborted) draw(data, reading, range);
   } catch (error) {
     if (controller.signal.aborted) return;
     plot.replaceChildren();
+    plot.onpointermove = plot.onclick = plot.onpointerleave = null;
+    sample.textContent = inspectHint;
     status.textContent = error.message || "Could not load history.";
   }
 }
-for (const field of [metric, hours]) field.addEventListener("change", load);
+for (const field of [metric, rangeSelect]) field.addEventListener("change", load);
 load();
 setInterval(load, 30000);
 </script>
