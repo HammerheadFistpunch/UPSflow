@@ -109,7 +109,8 @@ The older Tkinter desktop viewer can still be run with `python upsflow_gui.py`, 
 
 Open **History** from the dashboard, or visit `http://localhost:5005/history`.
 The chart compares the Server and Network UPS units over ranges from 15 minutes
-to 7 days. Readings include AC output and combined USB-A and USB-C output in watts.
+to 7 days. Readings include AC output, 12V DC output, and combined USB-A and USB-C
+output in watts.
 Hover or tap the chart to see the nearest recorded sample time and both units’
 values. Disconnected and stale samples appear as gaps.
 

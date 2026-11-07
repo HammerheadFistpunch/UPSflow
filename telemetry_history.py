@@ -11,6 +11,7 @@ from pathlib import Path
 METRICS = {
     "battery_percent", "ac_present", "ac_voltage", "ac_watts", "dc_in_watts",
     "total_input_watts", "output_watts", "net_watts", "ac_output_watts", "usb_output_watts",
+    "dc12v_output_watts",
 }
 
 
