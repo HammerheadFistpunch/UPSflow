@@ -128,6 +128,10 @@ The existing endpoints remain available at `/health` and `/v1/telemetry`. The co
 
 The older Tkinter desktop viewer can still be run with `python upsflow_gui.py`, but the browser dashboard is the recommended local display.
 
+The dashboard displays time to charge/discharge as signed `HH:MM`. River 2
+`remaining_time_charging` and `remaining_time_discharging` values in
+`raw_telemetry` are minutes; for example, 76 charging minutes displays `+01:16`.
+
 ## Telemetry history
 
 Open **History** from the dashboard, or visit `http://localhost:5005/history`.
