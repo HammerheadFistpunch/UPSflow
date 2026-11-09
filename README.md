@@ -35,6 +35,29 @@ The default AC-present threshold is 80 V. It can be changed with `ac_present_vol
 
 The underlying BLE implementation is the community `rabits/ha-ef-ble` project, pinned to commit `89fa21c113f38640b65fdaa9329a918a14d9efd3`. That implementation explicitly supports the base River 2 and exposes River 2 AC input power and other telemetry.
 
+## Automatic BLE recovery
+
+UPSflow owns recovery for each configured unit. A dropped connection triggers a
+fresh BLE scan and authentication. If a unit is absent at startup, its dashboard
+entry and API remain available while UPSflow keeps looking for it.
+
+Failed attempts retry indefinitely, waiting 5, 10, 20, 40, then at most 60 seconds
+between attempts. These delays follow the attempt, so scanning and connection
+work add to the total recovery time. A working unit continues streaming while
+the other recovers. Recovery and power commands share a lock so an active power
+cycle is allowed to finish before its BLE session is reset.
+
+Telemetry is marked stale after `stale_seconds` (15 seconds by default). A BLE
+link that remains connected but delivers no telemetry is rebuilt after
+`ble_recovery_stale_seconds` (60 seconds by default, with a minimum of twice
+`stale_seconds`). Authentication alone does not mark telemetry fresh.
+
+Each recovery attempt has a 60-second timeout and BLE cleanup has a 10-second
+timeout. The watchdog disables the library's separate reconnect loop to prevent
+competing connections. `/v1/telemetry` includes `recovering`, `recovery_attempts`,
+and the most recent recovery error. NSSM still handles process exits; recovery
+runs inside UPSflow without requiring a service restart.
+
 ## Initial setup
 
 From a PowerShell window:
@@ -251,4 +274,4 @@ The local controls page adds CYCLE beside AC, DC, and Energy Backup. Their ON/OF
 buttons use the verified endpoint too. Existing `/dc` and `/dc/reset` endpoints
 remain available with verified behavior. Update UPSflow before the PWR client.
 
-Run offline control tests with `python -m pytest -q test_power_control.py`.
+Run offline recovery and control tests with `python -m pytest -q`.

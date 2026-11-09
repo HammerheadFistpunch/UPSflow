@@ -4,6 +4,7 @@
   "history_sample_seconds": 60,
   "ac_present_voltage": 80.0,
   "stale_seconds": 15,
+  "ble_recovery_stale_seconds": 60,
   "http_host": "0.0.0.0",
   "http_port": 5005,
   "devices": {

@@ -8,11 +8,11 @@ import os
 import sqlite3
 import sys
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
+from ble_recovery import BLEWatchdog, DeviceState
 from power_control import execute_power, power_state
 from telemetry_history import TelemetryHistory
 
@@ -59,25 +59,6 @@ class UPSFlowRiver2(river2.Device):
     ac_input_current = raw_field(river2.pb_inv.ac_in_amp, pdiv(1000, 2)).default_when_missing(0)
 
 
-@dataclass
-class DeviceConfig:
-    key: str
-    address: str
-
-
-@dataclass
-class DeviceState:
-    key: str
-    device: UPSFlowRiver2
-    last_update: float = 0.0
-    last_error: str | None = None
-    power_updates: dict[str, float] = field(default_factory=dict)
-
-    @property
-    def stale(self) -> bool:
-        return self.last_update == 0 or (time.monotonic() - self.last_update) > 15
-
-
 def load_config(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise SystemExit(
@@ -119,33 +100,24 @@ async def scan() -> None:
         print("Make sure Bluetooth is enabled, both units are awake, and the Windows host is nearby.")
 
 
-async def connect_device(
-    state: DeviceState, user_id: str, max_attempts: int = 3
-) -> None:
-    try:
-        LOG.info("Connecting %s (%s)", state.key, state.device.address)
-        await state.device.connect(user_id, max_attempts=max_attempts)
-        status, error = await state.device.wait_until_authenticated_or_error(
-            return_exc=True
-        )
-        if error is not None:
-            raise error
-        LOG.info("%s authenticated: %s", state.key, status)
+def install_telemetry(state: DeviceState) -> None:
+    device = state.device
+    parser = eflib.get_fixed_length_coding_device(device)
+    if parser is None:
+        raise RuntimeError("River 2 telemetry parser is unavailable")
 
-        parser = eflib.get_fixed_length_coding_device(state.device)
-        if parser is not None:
-            def record_telemetry(message):
-                now = time.monotonic()
-                state.last_update = now
-                if isinstance(message, river2.Mr330MpptHeart):
-                    state.power_updates.update(ac=now, dc=now)
-                elif isinstance(message, river2.DirectPdHeartbeatPack):
-                    state.power_updates["reserve"] = now
-            parser.on_message_processed(record_telemetry)
+    def record_telemetry(message):
+        # Ignore any buffered callbacks from a retired connection.
+        if state.device is not device:
+            return
+        now = time.monotonic()
+        state.last_update = now
+        if isinstance(message, river2.Mr330MpptHeart):
+            state.power_updates.update(ac=now, dc=now)
+        elif isinstance(message, river2.DirectPdHeartbeatPack):
+            state.power_updates["reserve"] = now
 
-    except Exception as exc:
-        state.last_error = f"{type(exc).__name__}: {exc}"
-        LOG.exception("%s connection failed", state.key)
+    parser.on_message_processed(record_telemetry)
 
 
 def value(device: UPSFlowRiver2, name: str, default: float | int = 0) -> float | int:
@@ -188,7 +160,7 @@ def format_device(state: DeviceState, stale_seconds: int) -> list[str]:
     stale = state.last_update == 0 or (time.monotonic() - state.last_update) > stale_seconds
 
     lines = [state.key.upper()]
-    lines.append(f"  BLE:       {'Connected' if d.is_connected else 'Disconnected'}")
+    lines.append(f"  BLE:       {'Connected' if d is not None and d.is_connected else 'Disconnected'}")
     lines.append(f"  Battery:   {battery:.1f}%")
     lines.append(f"  AC input:  {'YES' if ac_present else 'NO'}")
     lines.append(f"  AC watts:  {ac_w:.0f} W")
@@ -289,10 +261,12 @@ def telemetry_device(state: DeviceState, stale_seconds: int) -> dict[str, Any]:
 
     raw = {field: json_value(getattr(d, field, None)) for field in TELEMETRY_FIELDS}
     return {
-        "connected": bool(d.is_connected),
+        "connected": bool(d is not None and d.is_connected),
         "name": json_value(getattr(d, "name", None)),
         "serial_number": json_value(getattr(d, "serial_number", None)),
-        "address": json_value(getattr(d, "address", None)),
+        "address": json_value(getattr(d, "address", state.address)),
+        "recovering": state.recovering,
+        "recovery_attempts": state.recovery_attempts,
         "battery_percent": battery,
         "ac_present": ac_v >= threshold,
         "ac_voltage": ac_v,
@@ -328,7 +302,7 @@ async def control_dc_port(
     state = find_device(states, key)
     if state is None:
         raise KeyError(f"device not configured: {key}")
-    if not state.device.is_connected:
+    if state.device is None or not state.device.is_connected:
         raise ConnectionError(f"{key} is not connected")
     return await execute_power(state, "dc", "ON" if enabled else "OFF")
 
@@ -339,7 +313,7 @@ async def apply_control(
     state = find_device(states, key)
     if state is None:
         raise KeyError(f"device not configured: {key}")
-    if not state.device.is_connected:
+    if state.device is None or not state.device.is_connected:
         raise ConnectionError(f"{key} is not connected")
 
     controls = {
@@ -456,7 +430,7 @@ function remainingTimeRow(d,net){
  return '<div class="row"><span class="label">Time remaining</span><span class="value">—</span></div>';
 }
 function card(key,d){
- const connected=d.connected?'<span class="ok">Connected</span>':'<span>Disconnected</span>',ac=d.ac_present?'<span class="ok">YES</span>':'<span>NO</span>',net=Number(d.net_watts||0),nc=net>=0?"positive":"negative";
+ const connected=d.recovering?'<span class="stale">Reconnecting</span>':d.connected?'<span class="ok">Connected</span>':d.recovery_attempts?'<span class="stale">Disconnected · retrying</span>':'<span>Disconnected</span>',ac=d.ac_present?'<span class="ok">YES</span>':'<span>NO</span>',net=Number(d.net_watts||0),nc=net>=0?"positive":"negative";
  const err=d.error?'<div class="row"><span class="label">Error</span><span class="value error">'+esc(d.error)+'</span></div>':"";
  return '<section class="card"><h2>'+esc(key).toUpperCase()+'</h2>'+
  '<div class="row"><span class="label">BLE</span><span class="value">'+connected+'</span></div>'+
@@ -975,30 +949,10 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
             LOG.warning("No BLE address configured for %s; skipping", key)
             continue
 
-        scanner_devices = await BleakScanner.discover(return_adv=True)
-        match = scanner_devices.get(address)
-        if match is None:
-            for candidate_address, pair in scanner_devices.items():
-                if candidate_address.lower() == address.lower():
-                    match = pair
-                    address = candidate_address
-                    break
-
-        if match is None:
-            LOG.error("Could not find configured %s device at %s", key, address)
-            continue
-
-        ble_dev, adv_data = match
-        device = river2_from_advertisement(ble_dev, adv_data)
-        if device is None:
-            LOG.error("Configured %s device is not advertising as a base River 2", key)
-            continue
-        states.append(DeviceState(key, device))
+        states.append(DeviceState(key=key, address=address))
 
     if not states:
-        raise SystemExit("No configured River 2 devices could be found. Run 'python upsflow.py scan'.")
-
-    await asyncio.gather(*(connect_device(state, user_id) for state in states))
+        raise SystemExit("No River 2 BLE addresses are configured.")
 
     poll_seconds = max(1, int(config.get("poll_seconds", 2)))
     stale_seconds = max(poll_seconds * 2, int(config.get("stale_seconds", 15)))
@@ -1018,6 +972,12 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
     )
     LOG.info("Telemetry API listening on %s:%d", http_host, http_port)
 
+    watchdog = BLEWatchdog(
+        BleakScanner.discover, river2_from_advertisement, install_telemetry,
+        user_id, CONTROL_LOCK,
+        stale_seconds=max(stale_seconds * 2, int(config.get("ble_recovery_stale_seconds", 60))),
+    )
+    recovery_tasks = [asyncio.create_task(watchdog.run(state)) for state in states]
     archive_task = (
         asyncio.create_task(archive_telemetry(history, states, stale_seconds, poll_seconds))
         if history is not None else None
@@ -1041,8 +1001,11 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
         if archive_task is not None:
             archive_task.cancel()
             await asyncio.gather(archive_task, return_exceptions=True)
+        for task in recovery_tasks:
+            task.cancel()
+        await asyncio.gather(*recovery_tasks, return_exceptions=True)
         await asyncio.gather(
-            *(state.device.disconnect() for state in states if state.device.is_connected),
+            *(watchdog.disconnect(state) for state in states),
             return_exceptions=True,
         )
 

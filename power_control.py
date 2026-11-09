@@ -20,7 +20,7 @@ def power_state(device, subsystem):
 
 
 def checked_state(state, subsystem):
-    if not state.device.is_connected:
+    if state.device is None or not state.device.is_connected:
         raise ConnectionError(f"{state.key} is not connected")
     updated = state.power_updates.get(subsystem, 0)
     if state.stale or not updated or time.monotonic() - updated > 15:
@@ -38,7 +38,7 @@ async def set_verified(state, subsystem, enabled, timeout_seconds=10):
         raise ValueError(f"{state.key} {subsystem.upper()} rejected by device")
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if not state.device.is_connected:
+        if state.device is None or not state.device.is_connected:
             raise ConnectionError(f"{state.key} disconnected during control")
         if state.power_updates.get(subsystem, 0) > baseline and not state.stale and power_state(state.device, subsystem) is enabled:
             return
