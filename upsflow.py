@@ -8,12 +8,14 @@ import os
 import sqlite3
 import sys
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
 from ble_recovery import BLEWatchdog, DeviceState
-from power_control import execute_power, power_state
+from long_term import LongTermHistory, number, read_rows, recommendation
+from power_control import checked_state, execute_power, power_state
 from telemetry_history import TelemetryHistory
 
 from bleak import BleakScanner
@@ -932,6 +934,94 @@ async def archive_telemetry(
         await asyncio.sleep(max(0, history.interval - (time.monotonic() - started)))
 
 
+async def tune_reserve(archive, state, options, month, daily, stale_seconds):
+    mode, minimum, maximum = options
+    async with CONTROL_LOCK:
+        live = telemetry_device(state, stale_seconds)
+        if not live["connected"] or live["stale"] or not live["ac_present"]:
+            return
+        try:
+            enabled = checked_state(state, "reserve")
+        except (ConnectionError, ValueError):
+            return
+        raw = live["raw_telemetry"]
+        reserve = raw["energy_backup_battery_level"]
+        limit = raw["battery_charge_limit_max"]
+        if not enabled or not number(reserve) or not number(limit) or not 0 <= reserve < limit <= 100:
+            return
+        proposed, reason = recommendation(daily, state.key, month, reserve, limit, minimum, maximum)
+        args = (month, state.key, reserve, proposed)
+        if proposed == reserve or mode == "recommend":
+            outcome = "unchanged" if proposed == reserve else "recommended"
+            await asyncio.to_thread(archive.record, *args, outcome, reason)
+            return
+
+        # Record the attempt before writing so a crash cannot trigger a second change.
+        await asyncio.to_thread(archive.record, *args, "attempted", reason)
+        outcome = "unconfirmed"
+        baseline = state.power_updates.get("reserve", 0)
+        try:
+            async with asyncio.timeout(15):
+                await apply_control([state], state.key, "backup_reserve", proposed)
+                while True:
+                    if state.device is None or not state.device.is_connected:
+                        raise ConnectionError("BLE disconnected")
+                    if (state.power_updates.get("reserve", 0) > baseline
+                            and state.device.energy_backup_battery_level == proposed):
+                        outcome = "applied"
+                        break
+                    await asyncio.sleep(0.25)
+        except Exception as exc:
+            reason = f"{reason}. {exc or type(exc).__name__}"
+        await asyncio.to_thread(archive.record, *args, outcome, reason)
+
+
+async def maintain_long_term(archive, states, tuning, stale_seconds):
+    while True:
+        today = date.today()
+        month = today.replace(day=1)
+        try:
+            await asyncio.to_thread(archive.refresh, today)
+            if tuning and archive.last_period is not None:
+                decisions, daily = await asyncio.to_thread(
+                    lambda: (read_rows(archive.decisions), read_rows(archive.daily))
+                )
+                done = {row["device"] for row in decisions if row["month"] == month.isoformat()}
+                for state in states:
+                    if state.key in tuning and state.key not in done:
+                        await tune_reserve(archive, state, tuning[state.key], month, daily, stale_seconds)
+        except (OSError, sqlite3.Error, ValueError):
+            LOG.exception("Could not maintain long-term history")
+        await asyncio.sleep(3600)
+
+
+def long_term_settings(config, history):
+    settings = config.get("long_term_history", {})
+    if not isinstance(settings, dict):
+        raise SystemExit("long_term_history must be a JSON object")
+    if settings.get("enabled") is not True:
+        return None, {}
+    if history is None:
+        raise SystemExit("long_term_history requires history_sample_seconds greater than zero")
+    retention = settings.get("raw_retention_days", 0)
+    if type(retention) is not int or (retention != 0 and retention < 35):
+        raise SystemExit("raw_retention_days must be zero or at least 35")
+    tuning = {}
+    for key, device in config.get("devices", {}).items():
+        options = device.get("reserve_tuning", {})
+        if not isinstance(options, dict):
+            raise SystemExit(f"{key}: reserve_tuning must be a JSON object")
+        mode = options.get("mode", "off")
+        if mode == "off":
+            continue
+        minimum, maximum = options.get("min_percent"), options.get("max_percent", 95)
+        if (mode not in ("recommend", "auto") or type(minimum) is not int
+                or type(maximum) is not int or not 0 <= minimum <= maximum <= 100):
+            raise SystemExit(f"{key}: use recommend or auto with valid min_percent and max_percent")
+        tuning[key] = mode, minimum, maximum
+    return LongTermHistory(history, retention), tuning
+
+
 async def monitor(config: dict[str, Any], config_path: Path) -> None:
     global CONFIG
     CONFIG = config
@@ -963,6 +1053,7 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
         TelemetryHistory(config_path.resolve().parent / "logs" / "telemetry.sqlite3", max(10, history_interval))
         if history_interval > 0 else None
     )
+    long_term, tuning = long_term_settings(config, history)
     http_server = await asyncio.start_server(
         lambda reader, writer: handle_http_client(
             reader, writer, states, stale_seconds, poll_seconds, history
@@ -982,6 +1073,10 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
         asyncio.create_task(archive_telemetry(history, states, stale_seconds, poll_seconds))
         if history is not None else None
     )
+    long_term_task = (
+        asyncio.create_task(maintain_long_term(long_term, states, tuning, stale_seconds))
+        if long_term is not None else None
+    )
     try:
         while True:
             print("\x1b[2J\x1b[H", end="")
@@ -998,9 +1093,10 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
     finally:
         http_server.close()
         await http_server.wait_closed()
-        if archive_task is not None:
-            archive_task.cancel()
-            await asyncio.gather(archive_task, return_exceptions=True)
+        history_tasks = [task for task in (archive_task, long_term_task) if task is not None]
+        for task in history_tasks:
+            task.cancel()
+        await asyncio.gather(*history_tasks, return_exceptions=True)
         for task in recovery_tasks:
             task.cancel()
         await asyncio.gather(*recovery_tasks, return_exceptions=True)

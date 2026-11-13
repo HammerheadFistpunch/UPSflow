@@ -143,7 +143,7 @@ values. Disconnected and stale samples appear as gaps.
 
 UPSflow saves full timestamped telemetry snapshots, including raw fields and
 connection status, in `logs/telemetry.sqlite3` beside the active configuration
-file. The archive survives restarts and does not expire automatically. It grows
+file. The archive survives restarts and does not expire by default. It grows
 as samples accumulate. Set `history_sample_seconds` in `config.json` to change
 the default 60-second interval (minimum 10 seconds), or set it to 0 to disable
 archival. Events shorter than the sample interval may fall between samples.
@@ -158,6 +158,61 @@ order. Pass the returned `next_after` as `?after=<id>` for the next page.
 Timestamps are Unix milliseconds in UTC. The history API uses the same local
 HTTP listener as live telemetry. For a consistent file backup, stop UPSflow
 before copying the SQLite database, then restart it.
+
+## Long-term history and seasonal reserve tuning
+
+Enable the following option in the active `config.json` and restart UPSflow.
+
+```json
+"long_term_history": {
+  "enabled": true,
+  "raw_retention_days": 0
+}
+```
+
+UPSflow backfills completed periods from the existing SQLite history. The Windows
+host's local calendar defines weeks (Monday through Sunday) and calendar months.
+The ongoing CSVs are in the `logs` directory beside the configuration:
+
+- `long-term-weekly.csv` has one row per device per completed week.
+- `long-term-monthly.csv` has one row per device per completed month.
+- `long-term-daily.csv` keeps the compact daily totals used for both rollups, so
+  weeks crossing month boundaries contribute the correct days to each month.
+
+The files record battery range, estimated solar/grid/output Wh and observed
+hours. Missing or stale intervals are omitted. A zero energy total can also
+reflect an unavailable power reading. Set `raw_retention_days` to 35 or more to
+expire old SQLite rows after the CSVs are saved. Zero keeps the full archive.
+SQLite reuses freed space for new records.
+
+To review monthly reserve changes for a particular unit, add this object inside
+that unit's entry under `devices`. Choose the lowest reserve you want UPSflow to
+use for that load. The numbers here are examples.
+
+```json
+"reserve_tuning": {
+  "mode": "recommend",
+  "min_percent": 30,
+  "max_percent": 85
+}
+```
+
+Use `"mode": "auto"` to apply changes, or `"mode": "off"` to disable tuning.
+Each month UPSflow evaluates the preceding calendar month independently per
+unit. It requires at least 14 days with at least 80% telemetry coverage, utility
+power, at least an hour of measured solar, and matching reserve and charge-limit
+settings. If most qualifying days reached within two points of the charge ceiling
+within three hours of solar starting, with at least 30 minutes of solar afterward,
+it recommends lowering the reserve five points. If most stayed more than five
+points below the ceiling all day, it recommends raising it five points. The
+configured bounds and device charge ceiling constrain the change.
+
+Auto mode checks that the unit is online, utility power is present, and Energy
+Backup is enabled. It changes only the Energy Backup reserve. The audit file
+`reserve-tuning.csv` records monthly recommendations, attempted writes, and
+whether the device confirmed the new reserve. UPSflow attempts at most one
+automatic change per unit per month. The tuning rules use observed solar input
+and battery behavior. A higher reserve can increase grid charging.
 
 ## Windows service with NSSM
 
