@@ -7,6 +7,7 @@ import logging
 import os
 import sqlite3
 import sys
+import tempfile
 import time
 from datetime import date
 from pathlib import Path
@@ -475,7 +476,7 @@ button,input,select{font:inherit}button{padding:9px 13px;font-weight:600;cursor:
 input,select{padding:8px;border:1px solid #cfd5dc;border-radius:6px}.note{color:#667085;font-size:13px;margin-top:8px}
 #status{color:#667085;font-size:13px}.error{color:#b42318}.ok{color:#067647}
 </style></head><body><main><h1>UPSflow</h1><div class="sub">EcoFlow River 2 controls</div>
-<nav><a href="/">Monitor</a><a class="active" href="/controls">Controls</a><a href="/history">History</a></nav><div id="devices"></div><div id="status">Loading…</div>
+<nav><a href="/">Monitor</a><a class="active" href="/controls">Controls</a><a href="/history">History</a></nav><div id="devices"></div><div id="tuning-status" role="status"></div><div id="status">Loading…</div>
 <script>
 const esc = (s) => String(s == null ? "—" : s);
 const controls = [
@@ -594,6 +595,95 @@ function makeControl(key, d, control, name, desc, type) {
   return wrap;
 }
 
+function makeTuningControl(key) {
+  const wrap = document.createElement("div");
+  wrap.className = "control";
+  wrap.dataset.tuningDevice = key;
+  wrap.innerHTML = `<h3>Reserve setpoint tuning</h3>
+    <p>Auto applies monthly changes. Review shows a recommendation for you to apply manually.
+    Off pauses tuning.</p>
+    <form class="row">
+      <label>Mode <select name="mode">
+        <option value="off">Off</option>
+        <option value="recommend">Review</option>
+        <option value="auto">Auto</option>
+      </select></label>
+      <label>Min % <input name="minimum" type="number" min="0" max="100"></label>
+      <label>Max % <input name="maximum" type="number" min="0" max="100"></label>
+      <button type="submit">Save</button>
+    </form>
+    <div class="note" data-tuning-detail></div>`;
+  const form = wrap.querySelector("form");
+  const status = document.getElementById("tuning-status");
+  form.querySelector("button").disabled = true;
+  form.oninput = () => { form.dataset.dirty = "true"; };
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const button = form.querySelector("button");
+    button.disabled = true;
+    form.dataset.saving = "true";
+    status.textContent = "Saving " + key.toUpperCase() + " tuning…";
+    try {
+      const response = await fetch("/v1/reserve-tuning", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          device: key, mode: form.elements.mode.value,
+          min_percent: form.elements.minimum.valueAsNumber,
+          max_percent: form.elements.maximum.valueAsNumber,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail);
+      delete form.dataset.dirty;
+      showTuning(wrap, result);
+      status.textContent = key.toUpperCase() + " tuning saved.";
+    } catch (error) {
+      status.textContent = "Could not save tuning: " + error.message;
+    } finally {
+      delete form.dataset.saving;
+      button.disabled = false;
+    }
+  };
+  return wrap;
+}
+
+function showTuning(wrap, settings) {
+  const form = wrap.querySelector("form");
+  const item = settings.devices[wrap.dataset.tuningDevice];
+  if (!item) return;
+  if (!form.dataset.dirty && !form.contains(document.activeElement)) {
+    form.elements.mode.value = item.mode;
+    form.elements.minimum.value = item.min_percent ?? "";
+    form.elements.maximum.value = item.max_percent;
+  }
+  form.querySelector("button").disabled = !settings.enabled;
+  const labels = {off: "Off", recommend: "Review", auto: "Auto"};
+  const decision = item.latest;
+  let detail = settings.enabled ? "Long-term logging enabled · Current: " + labels[item.mode]
+    : "Long-term logging is disabled. Enable it in config.json to use tuning.";
+  if (decision) {
+    const outcomes = {recommended: "Recommended", applied: "Applied", unchanged: "Unchanged",
+      attempted: "Attempted", unconfirmed: "Unconfirmed"};
+    detail += " · " + decision.month.slice(0, 7) + " " + outcomes[decision.outcome]
+      + " (" + decision.current + "% → " + decision.proposed + "%). " + decision.reason;
+  }
+  wrap.querySelector("[data-tuning-detail]").textContent = detail;
+}
+
+async function loadTuning() {
+  try {
+    const response = await fetch("/v1/reserve-tuning", {cache: "no-store"});
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const settings = await response.json();
+    document.querySelectorAll("[data-tuning-device]").forEach((wrap) => {
+      if (!wrap.querySelector("form").dataset.saving) showTuning(wrap, settings);
+    });
+  } catch (error) {
+    document.getElementById("tuning-status").textContent = "Tuning status unavailable: " + error.message;
+  }
+}
+
 function render(devices) {
   const root = document.getElementById("devices");
   root.innerHTML = "";
@@ -613,6 +703,7 @@ function render(devices) {
     note.className = "note";
     note.textContent = "Controls are sent directly to the River 2 over the existing authenticated BLE connection.";
     card.appendChild(note);
+    card.appendChild(makeTuningControl(key));
     root.appendChild(card);
   });
 }
@@ -642,7 +733,7 @@ function refreshCurrentStates(devices) {
       if (value != null && value !== "") input.value = value;
     });
 
-    const select = card.querySelector("select");
+    const select = card.querySelector(".control > .row > select");
     if (select && document.activeElement !== select) {
       const value = String(currentValue(d, "dc_mode") || "").toUpperCase();
       if (["AUTO", "SOLAR", "CAR"].includes(value)) select.value = value;
@@ -662,6 +753,7 @@ async function load() {
     const payload = await response.json();
     if (!document.querySelector(".card")) render(payload.devices);
     else refreshCurrentStates(payload.devices);
+    await loadTuning();
     status.textContent = "Telemetry loaded " + new Date().toLocaleTimeString();
   } catch (error) {
     status.className = "error";
@@ -740,6 +832,7 @@ async def handle_http_client(
     stale_seconds: int,
     poll_seconds: int,
     history: TelemetryHistory | None = None,
+    tuning_panel=None,
 ) -> None:
     try:
         request_line = await asyncio.wait_for(reader.readline(), timeout=2.0)
@@ -785,6 +878,22 @@ async def handle_http_client(
                     await http_response(writer, 200, result, "text/csv", filename="upsflow-history.csv")
                 else:
                     await http_response(writer, 200, result)
+        elif target == "/v1/reserve-tuning" and method in {"GET", "POST"} and tuning_panel:
+            try:
+                if method == "POST":
+                    if headers.get("content-type", "").split(";")[0].strip() != "application/json":
+                        raise ValueError("Content-Type must be application/json")
+                    length = int(headers.get("content-length", "0"))
+                    if not 0 < length <= 1024:
+                        raise ValueError("request body required (max 1024 bytes)")
+                    payload = json.loads(await asyncio.wait_for(reader.readexactly(length), timeout=2))
+                    await tuning_panel.save(payload)
+                await http_response(writer, 200, await tuning_panel.status())
+            except (ValueError, TypeError, KeyError) as exc:
+                await http_response(writer, 400, {"detail": str(exc)})
+            except OSError:
+                LOG.exception("Could not access reserve tuning settings")
+                await http_response(writer, 500, {"detail": "Could not access reserve tuning settings"})
         elif method == "GET" and target == "/controls":
             await http_response(writer, 200, CONTROLS_HTML, "text/html")
         elif method == "POST" and target.startswith("/v1/devices/") and target.endswith("/power"):
@@ -934,9 +1043,12 @@ async def archive_telemetry(
         await asyncio.sleep(max(0, history.interval - (time.monotonic() - started)))
 
 
-async def tune_reserve(archive, state, options, month, daily, stale_seconds):
-    mode, minimum, maximum = options
+async def tune_reserve(archive, state, tuning, month, daily, stale_seconds):
     async with CONTROL_LOCK:
+        options = tuning.get(state.key)
+        if options is None:
+            return
+        mode, minimum, maximum = options
         live = telemetry_device(state, stale_seconds)
         if not live["connected"] or live["stale"] or not live["ac_present"]:
             return
@@ -989,7 +1101,7 @@ async def maintain_long_term(archive, states, tuning, stale_seconds):
                 done = {row["device"] for row in decisions if row["month"] == month.isoformat()}
                 for state in states:
                     if state.key in tuning and state.key not in done:
-                        await tune_reserve(archive, state, tuning[state.key], month, daily, stale_seconds)
+                        await tune_reserve(archive, state, tuning, month, daily, stale_seconds)
         except (OSError, sqlite3.Error, ValueError):
             LOG.exception("Could not maintain long-term history")
         await asyncio.sleep(3600)
@@ -1020,6 +1132,74 @@ def long_term_settings(config, history):
             raise SystemExit(f"{key}: use recommend or auto with valid min_percent and max_percent")
         tuning[key] = mode, minimum, maximum
     return LongTermHistory(history, retention), tuning
+
+
+class TuningPanel:
+    def __init__(self, config, path, archive, tuning, states):
+        self.config = config
+        self.path = path.resolve()
+        self.archive = archive
+        self.tuning = tuning
+        self.keys = [state.key for state in states]
+
+    async def status(self):
+        rows = await asyncio.to_thread(read_rows, self.archive.decisions) if self.archive else []
+        latest = {row["device"]: row for row in rows}
+        devices = {}
+        for key in self.keys:
+            options = self.config["devices"][key].get("reserve_tuning", {})
+            if not isinstance(options, dict):
+                options = {}
+            devices[key] = {
+                "mode": self.tuning.get(key, ("off",))[0],
+                "min_percent": options.get("min_percent"),
+                "max_percent": options.get("max_percent", 95),
+                "latest": latest.get(key),
+            }
+        return {"enabled": self.archive is not None, "devices": devices}
+
+    async def save(self, payload):
+        if self.archive is None:
+            raise ValueError("Enable long-term logging in config.json first")
+        if not isinstance(payload, dict) or payload.get("device") not in self.keys:
+            raise ValueError("Unknown device")
+        key = payload["device"]
+        mode = payload.get("mode")
+        minimum, maximum = payload.get("min_percent"), payload.get("max_percent")
+        if mode not in ("off", "recommend", "auto"):
+            raise ValueError("Choose Off, Review, or Auto")
+        if not (mode == "off" and minimum is None) and (
+            type(minimum) is not int or type(maximum) is not int or not 0 <= minimum <= maximum <= 100
+        ):
+            raise ValueError("Enter a valid minimum and maximum reserve between 0 and 100")
+        async with CONTROL_LOCK:
+            options = await asyncio.to_thread(self.write_config, key, mode, minimum, maximum)
+            self.config["devices"][key]["reserve_tuning"] = options
+            if mode == "off":
+                self.tuning.pop(key, None)
+            else:
+                self.tuning[key] = mode, minimum, maximum
+
+    def write_config(self, key, mode, minimum, maximum):
+        # Read the active file again to preserve unrelated edits.
+        config = json.loads(self.path.read_text(encoding="utf-8"))
+        options = config["devices"][key].setdefault("reserve_tuning", {})
+        options["mode"] = mode
+        if minimum is not None:
+            options.update(min_percent=minimum, max_percent=maximum)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self.path.parent, delete=False
+            ) as target:
+                temporary = Path(target.name)
+                json.dump(config, target, indent=2)
+                target.write("\n")
+            os.replace(temporary, self.path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return options
 
 
 async def monitor(config: dict[str, Any], config_path: Path) -> None:
@@ -1054,9 +1234,10 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
         if history_interval > 0 else None
     )
     long_term, tuning = long_term_settings(config, history)
+    tuning_panel = TuningPanel(config, config_path, long_term, tuning, states)
     http_server = await asyncio.start_server(
         lambda reader, writer: handle_http_client(
-            reader, writer, states, stale_seconds, poll_seconds, history
+            reader, writer, states, stale_seconds, poll_seconds, history, tuning_panel
         ),
         http_host,
         http_port,

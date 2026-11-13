@@ -97,3 +97,34 @@ def test_telemetry_listener_updates_freshness_and_ignores_retired_device(app, mo
     state.device = object()
     callbacks[0](app.river2.DirectPdHeartbeatPack())
     assert state.last_update == baseline and 'reserve' not in state.power_updates
+
+
+def test_tuning_panel_persists_per_device_mode_and_restores_it_on_restart(app, tmp_path):
+    import json
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({
+        "user_id": "example",
+        "long_term_history": {"enabled": True},
+        "devices": {"server": {"address": "AA"}, "network": {"address": "BB"}},
+    }), encoding="utf-8")
+    config = app.load_config(path)
+    history = app.TelemetryHistory(tmp_path / "logs" / "telemetry.sqlite3", 60)
+    archive, tuning = app.long_term_settings(config, history)
+    states = [app.DeviceState(key, address=entry["address"]) for key, entry in config["devices"].items()]
+    panel = app.TuningPanel(config, path, archive, tuning, states)
+
+    async def check():
+        assert (await panel.status())["devices"]["server"]["mode"] == "off"
+        await panel.save({"device": "server", "mode": "recommend", "min_percent": 30, "max_percent": 85})
+        await panel.save({"device": "network", "mode": "auto", "min_percent": 40, "max_percent": 75})
+        with pytest.raises(ValueError):
+            await panel.save({"device": "network", "mode": "auto", "min_percent": 80, "max_percent": 75})
+        await panel.save({"device": "server", "mode": "off"})
+        saved = app.load_config(path)
+        assert saved["user_id"] == "example"
+        assert saved["devices"]["server"]["address"] == "AA"
+        assert saved["devices"]["server"]["reserve_tuning"]["min_percent"] == 30
+        assert app.long_term_settings(saved, history)[1] == tuning == {"network": ("auto", 40, 75)}
+
+    asyncio.run(check())

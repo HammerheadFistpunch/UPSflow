@@ -185,6 +185,14 @@ reflect an unavailable power reading. Set `raw_retention_days` to 35 or more to
 expire old SQLite rows after the CSVs are saved. Zero keeps the full archive.
 SQLite reuses freed space for new records.
 
+On **Controls**, each unit has a **Reserve setpoint tuning** section with its
+current mode, reserve bounds, and latest recorded monthly decision. Choose
+**Auto**, **Review**, or **Off**, then select **Save**. UPSflow saves the
+setting to the active configuration and uses it at the next tuning check
+without a restart. Review displays a proposed reserve, which you can apply
+using the **Energy Backup reserve** control. A decision already recorded for
+the current month stays in the audit log and is not rerun after a mode change.
+
 To review monthly reserve changes for a particular unit, add this object inside
 that unit's entry under `devices`. Choose the lowest reserve you want UPSflow to
 use for that load. The numbers here are examples.
