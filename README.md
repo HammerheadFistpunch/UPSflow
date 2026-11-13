@@ -222,6 +222,31 @@ whether the device confirmed the new reserve. UPSflow attempts at most one
 automatic change per unit per month. The tuning rules use observed solar input
 and battery behavior. A higher reserve can increase grid charging.
 
+### Optional Ollama tuning
+
+Add a top-level object to the active `config.json` and restart UPSflow to use
+the same Ollama server and model for both units. Each unit retains its own
+Off, Review, or Auto mode and reserve bounds.
+
+```json
+"ollama_tuning": {
+  "url": "http://192.168.68.107:11434",
+  "model": "qwen3.5:9b"
+}
+```
+
+UPSflow sends Ollama a compact summary of the qualifying days from the prior
+month. The server must be reachable from the UPSflow host and have the
+configured model installed. The model may propose any whole percentage
+within the unit's configured bounds and below its charge ceiling. The
+five-point step applies to the rules and their fallback.
+
+If the request fails or the model returns an invalid recommendation, UPSflow
+uses the existing rules in the selected mode. The Controls panel and
+`reserve-tuning.csv` identify the source and show **Rules fallback (Ollama
+failed: …)** with the failure reason. When Ollama is skipped for insufficient
+history, the decision says so. Omit `ollama_tuning` to use the rules alone.
+
 ## Windows service with NSSM
 
 The recommended service arrangement is:

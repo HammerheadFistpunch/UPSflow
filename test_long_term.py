@@ -37,3 +37,43 @@ def test_recommendation_uses_matching_prior_month_and_respects_bounds():
     for row in rows:
         row["tuning_signal"] = "below_target"
     assert recommendation(rows, "server", month, 70, 100, 68, 85)[0] == 75
+
+
+def test_ollama_accepts_larger_changes_and_labels_rules_fallback(monkeypatch):
+    import io
+    import json
+    from urllib.error import URLError
+
+    import ollama_tuning
+
+    settings = ("http://example.test:11434", "qwen3.5:9b")
+    rows = [
+        {"date": f"2026-10-{day:02}", "device": "server", "reserve": "70",
+         "charge_limit": "100", "tuning_signal": "early_full"}
+        for day in range(1, 15)
+    ]
+    args = settings, rows, "server", date(2026, 11, 1), 70, 100, 30, 85
+
+    def reply(percent):
+        def respond(request, timeout):
+            assert request.full_url == settings[0] + "/api/chat"
+            assert json.loads(request.data)["model"] == settings[1]
+            content = json.dumps({"reserve_percent": percent, "reason": "Consistently fills early."})
+            return io.BytesIO(json.dumps({"message": {"content": content}}).encode())
+        return respond
+
+    monkeypatch.setattr(ollama_tuning, "urlopen", reply(52))
+    assert ollama_tuning.choose_reserve(*args) == (52, "Ollama (qwen3.5:9b): Consistently fills early.")
+    monkeypatch.setattr(ollama_tuning, "urlopen", reply(29))
+    proposed, reason = ollama_tuning.choose_reserve(*args)
+    assert proposed == 65
+    assert reason.startswith("Rules fallback (Ollama failed: invalid")
+
+    def offline(*args, **kwargs):
+        raise URLError("offline")
+
+    monkeypatch.setattr(ollama_tuning, "urlopen", offline)
+    proposed, reason = ollama_tuning.choose_reserve(*args)
+    assert proposed == 65
+    assert reason.startswith("Rules fallback (Ollama failed: connection")
+    assert "Ollama skipped" in ollama_tuning.choose_reserve(settings, [], *args[2:])[1]

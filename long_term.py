@@ -173,14 +173,18 @@ def summarize(daily, today, monthly):
         }
 
 
-def recommendation(daily, device, month, reserve, charge_limit, minimum, maximum):
+def matching_days(daily, device, month, reserve, charge_limit):
     previous_month = (month - DAY).replace(day=1).isoformat()
-    rows = [
+    return [
         row for row in daily
         if row["device"] == device and row["date"][:7] == previous_month[:7]
         and row["tuning_signal"] and row["reserve"] not in ("", None) and row["charge_limit"]
         and float(row["reserve"]) == reserve and float(row["charge_limit"]) == charge_limit
     ]
+
+
+def recommendation(daily, device, month, reserve, charge_limit, minimum, maximum):
+    rows = matching_days(daily, device, month, reserve, charge_limit)
     if len(rows) < 14 or not minimum <= reserve <= maximum:
         return reserve, "insufficient matching history or reserve outside configured bounds"
     signals = [row["tuning_signal"] for row in rows]

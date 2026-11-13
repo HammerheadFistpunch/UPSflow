@@ -15,7 +15,8 @@ from typing import Any
 from urllib.parse import parse_qs
 
 from ble_recovery import BLEWatchdog, DeviceState
-from long_term import LongTermHistory, number, read_rows, recommendation
+from long_term import LongTermHistory, number, read_rows
+from ollama_tuning import choose_reserve, ollama_settings
 from power_control import checked_state, execute_power, power_state
 from telemetry_history import TelemetryHistory
 
@@ -662,6 +663,8 @@ function showTuning(wrap, settings) {
   const decision = item.latest;
   let detail = settings.enabled ? "Long-term logging enabled · Current: " + labels[item.mode]
     : "Long-term logging is disabled. Enable it in config.json to use tuning.";
+  if (settings.enabled) detail += settings.ollama_model
+    ? " · Ollama (" + settings.ollama_model + "), with rules fallback" : " · Rules";
   if (decision) {
     const outcomes = {recommended: "Recommended", applied: "Applied", unchanged: "Unchanged",
       attempted: "Attempted", unconfirmed: "Unconfirmed"};
@@ -1043,25 +1046,35 @@ async def archive_telemetry(
         await asyncio.sleep(max(0, history.interval - (time.monotonic() - started)))
 
 
-async def tune_reserve(archive, state, tuning, month, daily, stale_seconds):
+def current_tuning_inputs(state, stale_seconds):
+    live = telemetry_device(state, stale_seconds)
+    if not live["connected"] or live["stale"] or not live["ac_present"]:
+        return None
+    try:
+        enabled = checked_state(state, "reserve")
+    except (ConnectionError, ValueError):
+        return None
+    raw = live["raw_telemetry"]
+    reserve, limit = raw["energy_backup_battery_level"], raw["battery_charge_limit_max"]
+    if enabled and number(reserve) and number(limit) and 0 <= reserve < limit <= 100:
+        return reserve, limit
+    return None
+
+
+async def tune_reserve(archive, state, tuning, month, daily, stale_seconds, ollama):
+    options = tuning.get(state.key)
+    inputs = current_tuning_inputs(state, stale_seconds)
+    if options is None or inputs is None:
+        return
+    mode, minimum, maximum = options
+    reserve, limit = inputs
+    proposed, reason = await asyncio.to_thread(
+        choose_reserve, ollama, daily, state.key, month, reserve, limit, minimum, maximum
+    )
     async with CONTROL_LOCK:
-        options = tuning.get(state.key)
-        if options is None:
+        if (tuning.get(state.key) != options or current_tuning_inputs(state, stale_seconds) != inputs
+                or date.today().replace(day=1) != month):
             return
-        mode, minimum, maximum = options
-        live = telemetry_device(state, stale_seconds)
-        if not live["connected"] or live["stale"] or not live["ac_present"]:
-            return
-        try:
-            enabled = checked_state(state, "reserve")
-        except (ConnectionError, ValueError):
-            return
-        raw = live["raw_telemetry"]
-        reserve = raw["energy_backup_battery_level"]
-        limit = raw["battery_charge_limit_max"]
-        if not enabled or not number(reserve) or not number(limit) or not 0 <= reserve < limit <= 100:
-            return
-        proposed, reason = recommendation(daily, state.key, month, reserve, limit, minimum, maximum)
         args = (month, state.key, reserve, proposed)
         if proposed == reserve or mode == "recommend":
             outcome = "unchanged" if proposed == reserve else "recommended"
@@ -1088,7 +1101,7 @@ async def tune_reserve(archive, state, tuning, month, daily, stale_seconds):
         await asyncio.to_thread(archive.record, *args, outcome, reason)
 
 
-async def maintain_long_term(archive, states, tuning, stale_seconds):
+async def maintain_long_term(archive, states, tuning, stale_seconds, ollama):
     while True:
         today = date.today()
         month = today.replace(day=1)
@@ -1101,7 +1114,7 @@ async def maintain_long_term(archive, states, tuning, stale_seconds):
                 done = {row["device"] for row in decisions if row["month"] == month.isoformat()}
                 for state in states:
                     if state.key in tuning and state.key not in done:
-                        await tune_reserve(archive, state, tuning, month, daily, stale_seconds)
+                        await tune_reserve(archive, state, tuning, month, daily, stale_seconds, ollama)
         except (OSError, sqlite3.Error, ValueError):
             LOG.exception("Could not maintain long-term history")
         await asyncio.sleep(3600)
@@ -1135,12 +1148,13 @@ def long_term_settings(config, history):
 
 
 class TuningPanel:
-    def __init__(self, config, path, archive, tuning, states):
+    def __init__(self, config, path, archive, tuning, states, ollama=None):
         self.config = config
         self.path = path.resolve()
         self.archive = archive
         self.tuning = tuning
         self.keys = [state.key for state in states]
+        self.model = ollama[1] if ollama else None
 
     async def status(self):
         rows = await asyncio.to_thread(read_rows, self.archive.decisions) if self.archive else []
@@ -1156,7 +1170,7 @@ class TuningPanel:
                 "max_percent": options.get("max_percent", 95),
                 "latest": latest.get(key),
             }
-        return {"enabled": self.archive is not None, "devices": devices}
+        return {"enabled": self.archive is not None, "devices": devices, "ollama_model": self.model}
 
     async def save(self, payload):
         if self.archive is None:
@@ -1234,7 +1248,8 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
         if history_interval > 0 else None
     )
     long_term, tuning = long_term_settings(config, history)
-    tuning_panel = TuningPanel(config, config_path, long_term, tuning, states)
+    ollama = ollama_settings(config) if long_term else None
+    tuning_panel = TuningPanel(config, config_path, long_term, tuning, states, ollama)
     http_server = await asyncio.start_server(
         lambda reader, writer: handle_http_client(
             reader, writer, states, stale_seconds, poll_seconds, history, tuning_panel
@@ -1255,7 +1270,7 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
         if history is not None else None
     )
     long_term_task = (
-        asyncio.create_task(maintain_long_term(long_term, states, tuning, stale_seconds))
+        asyncio.create_task(maintain_long_term(long_term, states, tuning, stale_seconds, ollama))
         if long_term is not None else None
     )
     try:
