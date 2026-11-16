@@ -136,8 +136,8 @@ The dashboard displays time to charge/discharge as signed `HH:MM`. River 2
 
 Open **History** from the dashboard, or visit `http://localhost:5005/history`.
 The chart compares the Server and Network UPS units over ranges from 15 minutes
-to 7 days. Readings include AC output, 12V DC output, and combined USB-A and USB-C
-output in watts.
+to 30 days, including 2-hour and 4-hour views. Readings include cell temperature
+in °C, plus AC output, 12V DC output, and combined USB-A and USB-C output in watts.
 Hover or tap the chart to see the nearest recorded sample time and both units’
 values. Disconnected and stale samples appear as gaps.
 

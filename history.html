@@ -23,6 +23,7 @@ svg{display:block;width:100%;height:auto;margin-top:14px;color:#344054}
 <div class="toolbar">
 <label>Reading <select id="metric">
 <option value="battery_percent">Battery (%)</option>
+<option value="cell_temperature">Cell temperature (°C)</option>
 <option value="ac_watts">AC input (W)</option>
 <option value="dc_in_watts">DC input (W)</option>
 <option value="total_input_watts">Total input (W)</option>
@@ -36,10 +37,13 @@ svg{display:block;width:100%;height:auto;margin-top:14px;color:#344054}
 <option value="15">Last 15 minutes</option>
 <option value="30">Last 30 minutes</option>
 <option value="60">Last hour</option>
+<option value="120">Last 2 hours</option>
+<option value="240">Last 4 hours</option>
 <option value="360">Last 6 hours</option>
 <option value="720">Last 12 hours</option>
 <option value="1440" selected>Last 24 hours</option>
 <option value="10080">Last 7 days</option>
+<option value="43200">Last 30 days</option>
 </select></label>
 <a id="export" href="/v1/history.csv?hours=24">Export CSV</a>
 </div>
@@ -63,8 +67,9 @@ function draw(data, reading, range) {
   plot.replaceChildren();
   const samples = data.samples;
   const battery = reading === "battery_percent";
-  let low = 0;
-  let high = battery ? 100 : 1;
+  const temperature = reading === "cell_temperature";
+  let low = temperature ? Infinity : 0;
+  let high = temperature ? -Infinity : battery ? 100 : 1;
   let usable = false;
   for (const [, server, network] of samples) {
     for (const value of [server, network]) {
@@ -75,6 +80,10 @@ function draw(data, reading, range) {
         high = Math.max(high, value);
       }
     }
+  }
+  if (temperature) {
+    low = usable ? Math.floor(low) - 1 : 0;
+    high = usable ? Math.ceil(high) + 1 : 1;
   }
   const left = 55, right = 873, top = 20, bottom = 312;
   const x = time => left + (time - data.start_ms) / (data.end_ms - data.start_ms) * (right - left);
@@ -95,7 +104,7 @@ function draw(data, reading, range) {
         value.toLocaleString(undefined, {maximumFractionDigits:1}));
   }
   // Emphasize the zero crossing only when the visible range includes negative power.
-  if (!battery && low < 0) {
+  if (!battery && !temperature && low < 0) {
     const zeroY = y(0);
     add("line", {
       x1:left, y1:zeroY, x2:right, y2:zeroY,
@@ -145,7 +154,7 @@ function draw(data, reading, range) {
     return dot;
   });
   const sampleTime = new Intl.DateTimeFormat(undefined, {dateStyle:"medium", timeStyle:"medium"});
-  const unit = battery ? "%" : " W";
+  const unit = battery ? "%" : temperature ? " °C" : " W";
   const describe = value => Number.isFinite(value) ? value + unit : "No reading";
 
   function clearSample() {

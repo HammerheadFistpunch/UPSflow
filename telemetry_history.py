@@ -11,8 +11,10 @@ from pathlib import Path
 METRICS = {
     "battery_percent", "ac_present", "ac_voltage", "ac_watts", "dc_in_watts",
     "total_input_watts", "output_watts", "net_watts", "ac_output_watts", "usb_output_watts",
-    "dc12v_output_watts",
+    "dc12v_output_watts", "cell_temperature",
 }
+MAX_HISTORY_HOURS = 30 * 24
+MAX_HISTORY_MINUTES = MAX_HISTORY_HOURS * 60
 
 
 CSV_FIELDS = (
@@ -26,11 +28,11 @@ CSV_FIELDS = (
 
 def history_window(query: dict[str, list[str]]) -> tuple[int, int]:
     hours = int(query.get("hours", ["24"])[0])
-    if not 1 <= hours <= 168:
-        raise ValueError("hours must be 1–168")
+    if not 1 <= hours <= MAX_HISTORY_HOURS:
+        raise ValueError(f"hours must be 1–{MAX_HISTORY_HOURS}")
     minutes = int(query.get("minutes", [str(hours * 60)])[0])
-    if not 1 <= minutes <= 168 * 60:
-        raise ValueError("minutes must be 1–10080")
+    if not 1 <= minutes <= MAX_HISTORY_MINUTES:
+        raise ValueError(f"minutes must be 1–{MAX_HISTORY_MINUTES}")
     end = time.time_ns() // 1_000_000
     return end - minutes * 60_000, end
 
@@ -78,6 +80,7 @@ class TelemetryHistory:
 
         with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as db:
             if metric:
+                field_path = "raw_telemetry.cell_temperature" if metric == "cell_temperature" else metric
                 rows = db.execute("""
                     SELECT timestamp_ms,
                         CASE WHEN json_extract(snapshot, '$.devices.server.connected') = 1
@@ -88,7 +91,7 @@ class TelemetryHistory:
                              THEN json_extract(snapshot, ?) END
                     FROM telemetry WHERE timestamp_ms BETWEEN ? AND ?
                     ORDER BY timestamp_ms, id
-                """, (f"$.devices.server.{metric}", f"$.devices.network.{metric}", start, end))
+                """, (f"$.devices.server.{field_path}", f"$.devices.network.{field_path}", start, end))
                 return {**result, "start_ms": start, "end_ms": end, "samples": list(rows)}
 
             rows = db.execute("""
