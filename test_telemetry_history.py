@@ -29,3 +29,32 @@ def test_monthly_cell_temperature_uses_archived_raw_readings(tmp_path, monkeypat
     assert len(list(csv.DictReader(io.StringIO(history.export_csv(query))))) == 3
     with pytest.raises(ValueError, match="minutes must be"):
         history_window({"minutes": ["43201"]})
+
+
+def test_efficiency_calibration_data_and_overlay_use_dc_only_windows(tmp_path, monkeypatch):
+    from efficiency import balance_days
+
+    now = 2_000_000_000_000
+    start = now - 3_600_000
+    monkeypatch.setattr("telemetry_history.time.time_ns", lambda: now * 1_000_000)
+    history = TelemetryHistory(tmp_path / "history.sqlite3", 60)
+    network = {
+        "connected": True, "stale": False, "ac_enabled": True, "ac_watts": 0,
+        "total_input_watts": 44, "dc_in_watts": 44, "ac_output_watts": 21,
+        "net_watts": 20.5, "battery_percent": 76.06,
+        "raw_telemetry": {"battery_charge_limit_max": 100},
+    }
+    server = {**network, "ac_watts": 10, "total_input_watts": 54, "net_watts": 30.5}
+    for minute in range(60):
+        history.append(start + minute * 60_000, {"devices": {"network": network, "server": server}})
+
+    query = {"minutes": ["60"], "metric": ["net_watts"]}
+    assert history.read(query)["samples"][0] == (start, 30.5, 20.5)
+    assert history.read(query, {"network": 20.5, "server": 20.5})["samples"][0] == (
+        start, 30.5, 20.5, None, 0
+    )
+    assert balance_days(history, "server", start, now) == []
+    [network_day] = balance_days(history, "network", start, now)
+    assert network_day["windows"] == 1
+    assert network_day["net_watts"] == 20.5
+    assert balance_days(history, "network", start + 60_000, now) == []

@@ -8,6 +8,8 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
+from efficiency import DC_INVERTER
+
 METRICS = {
     "battery_percent", "ac_present", "ac_voltage", "ac_watts", "dc_in_watts",
     "total_input_watts", "output_watts", "net_watts", "ac_output_watts", "usb_output_watts",
@@ -62,7 +64,7 @@ class TelemetryHistory:
                 (timestamp_ms, payload),
             )
 
-    def read(self, query: dict[str, list[str]]) -> dict:
+    def read(self, query: dict[str, list[str]], corrections: dict | None = None) -> dict:
         metric = query.get("metric", [""])[0]
         after = int(query.get("after", ["0"])[0])
         if not 0 <= after < 2**63:
@@ -79,6 +81,29 @@ class TelemetryHistory:
             return {**result, "start_ms": start, "end_ms": end, "samples": [], "next_after": None}
 
         with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as db:
+            if metric == "net_watts" and corrections is not None:
+                qualifies = DC_INVERTER.replace("(device,", "(server,")
+                network_qualifies = DC_INVERTER.replace("(device,", "(network,")
+                rows = db.execute(f"""
+                    WITH readings AS (
+                        SELECT timestamp_ms, id,
+                            json_extract(snapshot, '$.devices.server') AS server,
+                            json_extract(snapshot, '$.devices.network') AS network
+                        FROM telemetry WHERE timestamp_ms BETWEEN ? AND ?
+                    )
+                    SELECT timestamp_ms,
+                        CASE WHEN json_extract(server, '$.connected') = 1
+                              AND json_extract(server, '$.stale') = 0
+                             THEN json_extract(server, '$.net_watts') END,
+                        CASE WHEN json_extract(network, '$.connected') = 1
+                              AND json_extract(network, '$.stale') = 0
+                             THEN json_extract(network, '$.net_watts') END,
+                        CASE WHEN {qualifies} THEN json_extract(server, '$.net_watts') - ? END,
+                        CASE WHEN {network_qualifies} THEN json_extract(network, '$.net_watts') - ? END
+                    FROM readings ORDER BY timestamp_ms, id
+                """, (start, end, corrections.get("server"), corrections.get("network")))
+                return {**result, "start_ms": start, "end_ms": end, "samples": list(rows)}
+
             if metric:
                 field_path = "raw_telemetry.cell_temperature" if metric == "cell_temperature" else metric
                 rows = db.execute("""

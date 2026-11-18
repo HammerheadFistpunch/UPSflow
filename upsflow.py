@@ -9,14 +9,15 @@ import sqlite3
 import sys
 import tempfile
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
 from ble_recovery import BLEWatchdog, DeviceState
-from long_term import LongTermHistory, number, read_rows
-from ollama_tuning import choose_reserve, ollama_settings
+from efficiency import balance_days, valid_correction
+from long_term import LongTermHistory, midnight, number, read_rows
+from ollama_tuning import choose_efficiency, choose_reserve, ollama_settings
 from power_control import checked_state, execute_power, power_state
 from telemetry_history import TelemetryHistory
 
@@ -602,7 +603,7 @@ function makeTuningControl(key) {
   wrap.dataset.tuningDevice = key;
   wrap.innerHTML = `<h3>Reserve setpoint tuning</h3>
     <p>Auto applies monthly changes. Review shows a recommendation for you to apply manually.
-    Off pauses tuning.</p>
+    Off pauses tuning. <a href="/history#efficiency-correction">Power efficiency calibration</a></p>
     <form class="row">
       <label>Mode <select name="mode">
         <option value="off">Off</option>
@@ -870,7 +871,13 @@ async def handle_http_client(
             try:
                 query = parse_qs(query_string, max_num_fields=8)
                 export = target.endswith(".csv")
-                result = await asyncio.to_thread(history.export_csv if export else history.read, query)
+                if export:
+                    result = await asyncio.to_thread(history.export_csv, query)
+                else:
+                    corrections = (tuning_panel.corrections() if tuning_panel
+                                   and query.get("corrected") == ["1"] else None)
+                    args = (query,) if corrections is None else (query, corrections)
+                    result = await asyncio.to_thread(history.read, *args)
             except ValueError as exc:
                 await http_response(writer, 400, {"detail": str(exc)})
             except (OSError, sqlite3.Error):
@@ -881,7 +888,8 @@ async def handle_http_client(
                     await http_response(writer, 200, result, "text/csv", filename="upsflow-history.csv")
                 else:
                     await http_response(writer, 200, result)
-        elif target == "/v1/reserve-tuning" and method in {"GET", "POST"} and tuning_panel:
+        elif target in {"/v1/reserve-tuning", "/v1/efficiency"} and method in {"GET", "POST"} and tuning_panel:
+            efficiency = target == "/v1/efficiency"
             try:
                 if method == "POST":
                     if headers.get("content-type", "").split(";")[0].strip() != "application/json":
@@ -890,13 +898,17 @@ async def handle_http_client(
                     if not 0 < length <= 1024:
                         raise ValueError("request body required (max 1024 bytes)")
                     payload = json.loads(await asyncio.wait_for(reader.readexactly(length), timeout=2))
-                    await tuning_panel.save(payload)
-                await http_response(writer, 200, await tuning_panel.status())
+                    if efficiency:
+                        await tuning_panel.update_efficiency(payload)
+                    else:
+                        await tuning_panel.save(payload)
+                result = tuning_panel.efficiency_status() if efficiency else await tuning_panel.status()
+                await http_response(writer, 200, result)
             except (ValueError, TypeError, KeyError) as exc:
                 await http_response(writer, 400, {"detail": str(exc)})
             except OSError:
-                LOG.exception("Could not access reserve tuning settings")
-                await http_response(writer, 500, {"detail": "Could not access reserve tuning settings"})
+                LOG.exception("Could not access tuning settings")
+                await http_response(writer, 500, {"detail": "Could not access tuning settings"})
         elif method == "GET" and target == "/controls":
             await http_response(writer, 200, CONTROLS_HTML, "text/html")
         elif method == "POST" and target.startswith("/v1/devices/") and target.endswith("/power"):
@@ -1101,7 +1113,7 @@ async def tune_reserve(archive, state, tuning, month, daily, stale_seconds, olla
         await asyncio.to_thread(archive.record, *args, outcome, reason)
 
 
-async def maintain_long_term(archive, states, tuning, stale_seconds, ollama):
+async def maintain_long_term(archive, states, tuning, stale_seconds, ollama, panel):
     while True:
         today = date.today()
         month = today.replace(day=1)
@@ -1115,6 +1127,9 @@ async def maintain_long_term(archive, states, tuning, stale_seconds, ollama):
                 for state in states:
                     if state.key in tuning and state.key not in done:
                         await tune_reserve(archive, state, tuning, month, daily, stale_seconds, ollama)
+            for key, item in panel.efficiency_status()["devices"].items():
+                if item["auto"] and item["last_auto_month"] != month.isoformat():
+                    await panel.calibrate_efficiency(key, month)
         except (OSError, sqlite3.Error, ValueError):
             LOG.exception("Could not maintain long-term history")
         await asyncio.sleep(3600)
@@ -1154,7 +1169,94 @@ class TuningPanel:
         self.archive = archive
         self.tuning = tuning
         self.keys = [state.key for state in states]
+        self.ollama = ollama
         self.model = ollama[1] if ollama else None
+        self.calibrating = set()
+        for key in self.keys:
+            options = self.efficiency_options(key)
+            if not isinstance(options, dict) or not valid_correction(options.get("correction_watts", 0)):
+                raise SystemExit(f"{key}: efficiency correction must be between 0 and 100 W")
+
+    def efficiency_options(self, key):
+        return self.config["devices"][key].get("efficiency_correction", {})
+
+    def corrections(self):
+        return {key: self.efficiency_options(key).get("correction_watts", 0) for key in self.keys}
+
+    def efficiency_status(self):
+        devices = {}
+        for key in self.keys:
+            options = self.efficiency_options(key)
+            devices[key] = {
+                "correction_watts": options.get("correction_watts", 0),
+                "auto": options.get("auto") is True,
+                "reason": options.get("reason"),
+                "last_auto_month": options.get("last_auto_month"),
+                "calibrating": key in self.calibrating,
+            }
+        return {"devices": devices, "ollama_model": self.model}
+
+    async def set_efficiency(self, key, updates):
+        options = await asyncio.to_thread(self.write_config, key, "efficiency_correction", updates)
+        self.config["devices"][key]["efficiency_correction"] = options
+
+    async def update_efficiency(self, payload):
+        if not isinstance(payload, dict) or payload.get("device") not in self.keys:
+            raise ValueError("Unknown device")
+        key = payload["device"]
+        action = payload.get("action")
+        if action == "calibrate":
+            if not self.ollama:
+                raise ValueError("Enable long-term history and configure Ollama to calibrate")
+            await self.calibrate_efficiency(key)
+        elif action == "save":
+            watts, auto = payload.get("correction_watts"), payload.get("auto")
+            if not valid_correction(watts) or type(auto) is not bool:
+                raise ValueError("Enter a correction between 0 and 100 W")
+            if auto and not self.ollama:
+                raise ValueError("Enable long-term history and configure Ollama for monthly calibration")
+            async with CONTROL_LOCK:
+                await self.set_efficiency(key, {
+                    "correction_watts": round(watts, 2), "auto": auto, "reason": "Saved manually.",
+                })
+        else:
+            raise ValueError("Unknown efficiency action")
+
+    async def calibrate_efficiency(self, key, month=None):
+        if not self.ollama or key in self.calibrating:
+            return
+        self.calibrating.add(key)
+        try:
+            previous = self.efficiency_options(key)
+            if month:
+                start = midnight((month - timedelta(days=1)).replace(day=1))
+                end = midnight(month)
+            else:
+                end = time.time_ns() // 1_000_000
+                start = end - 30 * 86_400_000
+            days = await asyncio.to_thread(balance_days, self.archive.history, key, start, end)
+            windows = sum(day["windows"] for day in days)
+            proposed = None
+            if not days or (month and len(days) < 3):
+                reason = ("Insufficient steady battery data. Monthly calibration requires three "
+                          "qualifying days in the previous month." if month else
+                          "No qualifying steady battery window in the last 30 days.")
+            else:
+                proposed, reason = await asyncio.to_thread(
+                    choose_efficiency, self.ollama, days, previous.get("correction_watts", 0)
+                )
+            updates = {"reason": f"{reason} ({windows} windows across {len(days)} days.)"}
+            if proposed is not None:
+                updates["correction_watts"] = proposed
+            if month:
+                updates["last_auto_month"] = month.isoformat()
+            async with CONTROL_LOCK:
+                if self.efficiency_options(key) is previous or (
+                    not previous and not self.efficiency_options(key)
+                ):
+                    await self.set_efficiency(key, updates)
+        finally:
+            self.calibrating.remove(key)
 
     async def status(self):
         rows = await asyncio.to_thread(read_rows, self.archive.decisions) if self.archive else []
@@ -1187,20 +1289,21 @@ class TuningPanel:
         ):
             raise ValueError("Enter a valid minimum and maximum reserve between 0 and 100")
         async with CONTROL_LOCK:
-            options = await asyncio.to_thread(self.write_config, key, mode, minimum, maximum)
+            updates = {"mode": mode}
+            if minimum is not None:
+                updates.update(min_percent=minimum, max_percent=maximum)
+            options = await asyncio.to_thread(self.write_config, key, "reserve_tuning", updates)
             self.config["devices"][key]["reserve_tuning"] = options
             if mode == "off":
                 self.tuning.pop(key, None)
             else:
                 self.tuning[key] = mode, minimum, maximum
 
-    def write_config(self, key, mode, minimum, maximum):
+    def write_config(self, key, section, updates):
         # Read the active file again to preserve unrelated edits.
         config = json.loads(self.path.read_text(encoding="utf-8"))
-        options = config["devices"][key].setdefault("reserve_tuning", {})
-        options["mode"] = mode
-        if minimum is not None:
-            options.update(min_percent=minimum, max_percent=maximum)
+        options = config["devices"][key].setdefault(section, {})
+        options.update(updates)
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -1270,7 +1373,7 @@ async def monitor(config: dict[str, Any], config_path: Path) -> None:
         if history is not None else None
     )
     long_term_task = (
-        asyncio.create_task(maintain_long_term(long_term, states, tuning, stale_seconds, ollama))
+        asyncio.create_task(maintain_long_term(long_term, states, tuning, stale_seconds, ollama, tuning_panel))
         if long_term is not None else None
     )
     try:

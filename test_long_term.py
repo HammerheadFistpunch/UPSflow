@@ -77,3 +77,20 @@ def test_ollama_accepts_larger_changes_and_labels_rules_fallback(monkeypatch):
     assert proposed == 65
     assert reason.startswith("Rules fallback (Ollama failed: connection")
     assert "Ollama skipped" in ollama_tuning.choose_reserve(settings, [], *args[2:])[1]
+
+
+def test_ollama_efficiency_rejects_correction_far_from_observed_balance(monkeypatch):
+    import ollama_tuning
+
+    days = [{"net_watts": 20.5}]
+    settings = ("http://example.test:11434", "model")
+    monkeypatch.setattr(ollama_tuning, "chat_json", lambda *_: {
+        "correction_watts": 50, "reason": "Too high.",
+    })
+    value, reason = ollama_tuning.choose_efficiency(settings, days, 19)
+    assert value is None
+    assert "Kept the existing correction" in reason
+    monkeypatch.setattr(ollama_tuning, "chat_json", lambda *_: {
+        "correction_watts": 20.5, "reason": "Matches the observed balance.",
+    })
+    assert ollama_tuning.choose_efficiency(settings, days, 19)[0] == 20.5

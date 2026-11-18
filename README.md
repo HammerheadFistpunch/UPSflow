@@ -159,6 +159,25 @@ Timestamps are Unix milliseconds in UTC. The history API uses the same local
 HTTP listener as live telemetry. For a consistent file backup, stop UPSflow
 before copying the SQLite database, then restart it.
 
+## Net power correction
+
+On **History**, enter each device's estimated loss in watts and select **Save**.
+Enable **Show corrected net power** to overlay dashed lines on the raw net
+power chart. UPSflow subtracts the configured loss from net power when the
+inverter is on and DC is the sole measured input. The overlay uses the current
+setting for the selected historical range. Raw telemetry and CSV exports retain
+their original values.
+
+With long-term history and Ollama configured, **Calibrate now** can estimate
+and save the device's correction from the last 30 days. **Monthly Ollama
+calibration** opts that device into automatic updates using the previous
+calendar month, with qualifying data required on at least three days. The
+calibration uses nearly hour-long windows of stable reported battery percentage
+away from the charge ceiling. UPSflow constrains the model's recommendation to
+within 2 W of the median daily net balance. The device's status shows the
+outcome. If evidence is insufficient or the model call fails, the correction
+stays at its current value.
+
 ## Long-term history and seasonal reserve tuning
 
 Enable the following option in the active `config.json` and restart UPSflow.

@@ -8,11 +8,14 @@
 body{font:16px Segoe UI,Arial,sans-serif;margin:0;background:#f3f4f6;color:#17202a}
 main{max-width:1100px;margin:auto;padding:24px}
 h1{margin:0 0 16px}nav,.toolbar,.legend{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
-nav a,select,.toolbar a{font:inherit;padding:8px 12px;border:1px solid #cfd5dc;border-radius:7px;background:white;color:#344054;text-decoration:none}
+nav a,select,.toolbar a,button,input[type=number]{font:inherit;padding:8px 12px;border:1px solid #cfd5dc;border-radius:7px;background:white;color:#344054;text-decoration:none}
 nav .active{background:#344054;color:white}
 section{margin-top:20px;background:white;border:1px solid #d9dee5;border-radius:10px;padding:16px}
 svg{display:block;width:100%;height:auto;margin-top:14px;color:#344054}
 #sample{min-height:1.3em;color:#344054;font-variant-numeric:tabular-nums}
+#efficiency-settings form{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:12px 0}
+#efficiency-settings input[type=number]{width:6em}
+#efficiency-settings small{flex-basis:100%}
 #status{color:#475467;min-height:1.3em}.server{color:#175cd3}.network{color:#a33b08}
 </style>
 </head>
@@ -45,12 +48,19 @@ svg{display:block;width:100%;height:auto;margin-top:14px;color:#344054}
 <option value="10080">Last 7 days</option>
 <option value="43200">Last 30 days</option>
 </select></label>
+<label><input type="checkbox" id="corrected"> Show corrected net power</label>
 <a id="export" href="/v1/history.csv?hours=24">Export CSV</a>
 </div>
 <svg id="plot" viewBox="0 0 900 350" role="img" aria-label="Server and network UPS telemetry over time"></svg>
-<div class="legend"><strong class="server">● Server</strong><strong class="network">● Network</strong></div>
+<div class="legend"><strong class="server">● Server</strong><strong class="network">● Network</strong><span id="corrected-legend" hidden>Dashed lines show corrected net power.</span></div>
 <p id="sample">Hover or tap the chart to inspect a sample.</p>
 <p id="status" role="status">Loading history…</p>
+</section>
+<section id="efficiency-correction" aria-label="Efficiency correction">
+<h2>Efficiency correction</h2>
+<p>Subtract estimated losses in watts from reported net power when DC is the only input and the AC inverter is enabled.</p>
+<div id="efficiency-settings"></div>
+<p id="efficiency-status" role="status"></p>
 </section>
 </main>
 <script>
@@ -62,8 +72,90 @@ const status = document.getElementById("status");
 const sample = document.getElementById("sample");
 const inspectHint = sample.textContent;
 let request;
+const corrected = document.getElementById("corrected");
+const efficiencySettings = document.getElementById("efficiency-settings");
+const efficiencyStatus = document.getElementById("efficiency-status");
 
-function draw(data, reading, range) {
+function showEfficiency(data, updatedForm) {
+  for (const [key, item] of Object.entries(data.devices)) {
+    let form = document.getElementById("efficiency-" + key);
+    if (!form) {
+      form = document.createElement("form");
+      form.id = "efficiency-" + key;
+      form.innerHTML = '<strong></strong> <label>Loss (W) <input name="watts" type="number" min="0" max="100" step="0.01" required></label>'
+        + '<label><input name="auto" type="checkbox"> Monthly Ollama calibration</label>'
+        + '<button type="submit">Save</button><button type="button" name="calibrate">Calibrate now</button>'
+        + '<small></small>';
+      form.querySelector("strong").textContent = key === "server" ? "Server" : "Network";
+      form.addEventListener("input", () => {
+        form.dataset.dirty = "true";
+        form.elements.calibrate.disabled = true;
+      });
+      form.onsubmit = event => {
+        event.preventDefault();
+        updateEfficiency(form, {device:key, action:"save", correction_watts:form.elements.watts.valueAsNumber,
+          auto:form.elements.auto.checked});
+      };
+      form.elements.calibrate.onclick = () => updateEfficiency(form, {device:key, action:"calibrate"});
+      efficiencySettings.append(form);
+    }
+    if (form.dataset.busy) continue;
+    if (!form.dataset.dirty && (form === updatedForm || !form.contains(document.activeElement))) {
+      form.elements.watts.value = item.correction_watts;
+      form.elements.auto.checked = item.auto;
+    }
+    form.elements.auto.disabled = !data.ollama_model && !item.auto;
+    form.elements.calibrate.disabled = !data.ollama_model || item.calibrating || !!form.dataset.dirty;
+    form.querySelector("small").textContent = item.calibrating ? "Calibrating…" :
+      item.reason || (data.ollama_model ? "" : "Enable long-term history and configure Ollama for calibration.");
+  }
+}
+
+async function updateEfficiency(form, payload) {
+  const controls = [...form.elements];
+  const disabled = controls.map(control => control.disabled);
+  controls.forEach(control => { control.disabled = true; });
+  form.dataset.busy = "true";
+  efficiencyStatus.textContent = payload.action === "calibrate" ? "Calibrating with Ollama…" : "Saving…";
+  let result;
+  try {
+    const response = await fetch("/v1/efficiency", {
+      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Request failed");
+    result = data;
+    delete form.dataset.dirty;
+    efficiencyStatus.textContent = payload.action === "save" ? "Correction saved." : "Calibration finished. See the device result.";
+  } catch (error) {
+    efficiencyStatus.textContent = error.message;
+  } finally {
+    delete form.dataset.busy;
+    controls.forEach((control, index) => { control.disabled = disabled[index]; });
+  }
+  if (result) {
+    showEfficiency(result, form);
+    load();
+  }
+}
+
+let efficiencyRequestInProgress = false;
+async function loadEfficiency() {
+  if (efficiencyRequestInProgress || efficiencySettings.querySelector("[data-busy]")) return;
+  efficiencyRequestInProgress = true;
+  try {
+    const response = await fetch("/v1/efficiency", {cache:"no-store"});
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const result = await response.json();
+    if (!efficiencySettings.querySelector("[data-busy]")) showEfficiency(result);
+  } catch (error) {
+    efficiencyStatus.textContent = "Efficiency settings unavailable. " + error.message;
+  } finally {
+    efficiencyRequestInProgress = false;
+  }
+}
+
+function draw(data, reading, range, overlay) {
   plot.replaceChildren();
   const samples = data.samples;
   const battery = reading === "battery_percent";
@@ -71,8 +163,8 @@ function draw(data, reading, range) {
   let low = temperature ? Infinity : 0;
   let high = temperature ? -Infinity : battery ? 100 : 1;
   let usable = false;
-  for (const [, server, network] of samples) {
-    for (const value of [server, network]) {
+  for (const [, ...values] of samples) {
+    for (const value of values) {
       if (!Number.isFinite(value)) continue;
       usable = true;
       if (!battery) {
@@ -123,7 +215,12 @@ function draw(data, reading, range) {
     add("text", {x:x(time), y:bottom + 25, "text-anchor":index === 4 ? "end" : index === 0 ? "start" : "middle", fill:"currentColor"},
         format.format(time));
   }
+  const names = ["Server", "Network"];
   const colors = ["#175cd3", "#a33b08"];
+  if (overlay) {
+    names.push("Server corrected", "Network corrected");
+    colors.push(...colors);
+  }
   for (const [index, color] of colors.entries()) {
     const path = [];
     let previous = null;
@@ -143,7 +240,8 @@ function draw(data, reading, range) {
       }
       previous = time;
     }
-    add("path", {d:path.join(" "), fill:"none", stroke:color, "stroke-width":2, "stroke-linecap":"round"});
+    add("path", {d:path.join(" "), fill:"none", stroke:color, "stroke-width":2, "stroke-linecap":"round",
+      "stroke-dasharray":index >= 2 ? "7 5" : "none"});
   }
   const marker = add("g", {"pointer-events":"none", display:"none"});
   const guide = add("line", {y1:top, y2:bottom, stroke:"#667085", "stroke-dasharray":"4 4"});
@@ -155,7 +253,7 @@ function draw(data, reading, range) {
   });
   const sampleTime = new Intl.DateTimeFormat(undefined, {dateStyle:"medium", timeStyle:"medium"});
   const unit = battery ? "%" : temperature ? " °C" : " W";
-  const describe = value => Number.isFinite(value) ? value + unit : "No reading";
+  const describe = value => Number.isFinite(value) ? value.toLocaleString(undefined, {maximumFractionDigits:2}) + unit : "No reading";
 
   function clearSample() {
     marker.setAttribute("display", "none");
@@ -178,11 +276,11 @@ function draw(data, reading, range) {
       else last = middle;
     }
     if (first > 0 && Math.abs(samples[first - 1][0] - time) < Math.abs(samples[first][0] - time)) first--;
-    const [timestamp, server, network] = samples[first];
+    const [timestamp, ...values] = samples[first];
     const xx = x(timestamp);
     guide.setAttribute("x1", xx);
     guide.setAttribute("x2", xx);
-    for (const [index, value] of [server, network].entries()) {
+    for (const [index, value] of values.entries()) {
       const dot = dots[index];
       dot.setAttribute("visibility", Number.isFinite(value) ? "visible" : "hidden");
       if (Number.isFinite(value)) {
@@ -191,7 +289,8 @@ function draw(data, reading, range) {
       }
     }
     marker.removeAttribute("display");
-    sample.textContent = `${sampleTime.format(timestamp)} · Server ${describe(server)} · Network ${describe(network)}`;
+    sample.textContent = [sampleTime.format(timestamp),
+      ...names.map((name, index) => name + " " + describe(values[index]))].join(" · ");
   }
 
   clearSample();
@@ -213,12 +312,14 @@ async function load() {
   const controller = new AbortController();
   request = controller;
   const reading = metric.value, range = Number(rangeSelect.value);
+  const overlay = corrected.checked;
+  document.getElementById("corrected-legend").hidden = !overlay;
   exportLink.href = `/v1/history.csv?minutes=${range}`;
   try {
-    const response = await fetch(`/v1/history?metric=${reading}&minutes=${range}`, {signal:controller.signal});
+    const response = await fetch(`/v1/history?metric=${reading}&minutes=${range}&corrected=${Number(overlay)}`, {signal:controller.signal});
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail);
-    if (!controller.signal.aborted) draw(data, reading, range);
+    if (!controller.signal.aborted) draw(data, reading, range, overlay);
   } catch (error) {
     if (controller.signal.aborted) return;
     plot.replaceChildren();
@@ -227,9 +328,18 @@ async function load() {
     status.textContent = error.message || "Could not load history.";
   }
 }
-for (const field of [metric, rangeSelect]) field.addEventListener("change", load);
+metric.addEventListener("change", () => {
+  if (metric.value !== "net_watts") corrected.checked = false;
+  load();
+});
+rangeSelect.addEventListener("change", load);
+corrected.addEventListener("change", () => {
+  if (corrected.checked) metric.value = "net_watts";
+  load();
+});
 load();
-setInterval(load, 30000);
+loadEfficiency();
+setInterval(() => { load(); loadEfficiency(); }, 30000);
 </script>
 </body>
 </html>
