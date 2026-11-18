@@ -161,8 +161,8 @@ before copying the SQLite database, then restart it.
 
 ## Net power correction
 
-On **History**, enter each device's estimated loss as a **percentage of DC
-input** and select **Save**. Enable **Show corrected net power** for dashed
+On **Controls**, enter each device's estimated loss as a **percentage of DC
+input** and select **Save**. On **History**, enable **Show corrected net power** for dashed
 lines over the raw net power chart. With the AC inverter on, corrected net
 power is raw net power minus DC input watts times the loss fraction. This
 works with any DC input source, including when AC input is also present.

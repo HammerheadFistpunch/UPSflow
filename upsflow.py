@@ -477,10 +477,104 @@ nav a{padding:8px 12px;border:1px solid #cfd5dc;border-radius:7px;background:whi
 button,input,select{font:inherit}button{padding:9px 13px;font-weight:600;cursor:pointer}button:disabled{cursor:wait;opacity:.65}
 input,select{padding:8px;border:1px solid #cfd5dc;border-radius:6px}.note{color:#667085;font-size:13px;margin-top:8px}
 #status{color:#667085;font-size:13px}.error{color:#b42318}.ok{color:#067647}
+#efficiency-settings form{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:12px 0}
+#efficiency-settings input[type=number]{width:6em}
+#efficiency-settings small{flex-basis:100%}
 </style></head><body><main><h1>UPSflow</h1><div class="sub">EcoFlow River 2 controls</div>
 <nav><a href="/">Monitor</a><a class="active" href="/controls">Controls</a><a href="/history">History</a></nav><div id="devices"></div><div id="tuning-status" role="status"></div><div id="status">Loading…</div>
+<section id="efficiency-correction" aria-label="Efficiency correction">
+<h2>Efficiency correction</h2>
+<p>Subtract a percentage of DC input from reported net power whenever DC input is active and the AC inverter is enabled.</p>
+<div id="efficiency-settings"></div>
+<p id="efficiency-status" role="status"></p>
+</section>
 <script>
 const esc = (s) => String(s == null ? "—" : s);
+const efficiencySettings = document.getElementById("efficiency-settings");
+const efficiencyStatus = document.getElementById("efficiency-status");
+
+function showEfficiency(data, updatedForm) {
+  for (const [key, item] of Object.entries(data.devices)) {
+    let form = document.getElementById("efficiency-" + key);
+    if (!form) {
+      form = document.createElement("form");
+      form.id = "efficiency-" + key;
+      form.innerHTML = '<strong></strong> <label>DC input loss (%) <input name="percent" type="number" min="0" max="100" step="0.01" required></label>'
+        + '<label><input name="auto" type="checkbox"> Monthly Ollama calibration</label>'
+        + '<button type="submit">Save</button><button type="button" name="calibrate">Calibrate now</button>'
+        + '<small></small>';
+      form.querySelector("strong").textContent = key === "server" ? "Server" : "Network";
+      form.addEventListener("input", () => {
+        form.dataset.dirty = "true";
+        form.elements.calibrate.disabled = true;
+      });
+      form.onsubmit = event => {
+        event.preventDefault();
+        updateEfficiency(form, {device:key, action:"save", correction_percent:form.elements.percent.valueAsNumber,
+          auto:form.elements.auto.checked});
+      };
+      form.elements.calibrate.onclick = () => updateEfficiency(form, {device:key, action:"calibrate"});
+      efficiencySettings.append(form);
+    }
+    if (form.dataset.busy) continue;
+    if (!form.dataset.dirty && (form === updatedForm || !form.contains(document.activeElement))) {
+      form.elements.percent.value = item.correction_percent ?? "";
+      form.elements.auto.checked = item.auto;
+    }
+    form.elements.auto.disabled = !data.ollama_model && !item.auto;
+    form.elements.calibrate.disabled = !data.ollama_model || item.calibrating || !!form.dataset.dirty;
+    form.querySelector("small").textContent = item.calibrating ? "Calibrating…" :
+      [item.legacy_loss_watts ? `Previous ${item.legacy_loss_watts} W correction is active until you save or calibrate a percentage.` : "",
+        item.reason || (data.ollama_model ? "" : "Enable long-term history and configure Ollama for calibration.")]
+        .filter(Boolean).join(" ");
+  }
+}
+
+async function updateEfficiency(form, payload) {
+  const controls = [...form.elements];
+  const disabled = controls.map(control => control.disabled);
+  controls.forEach(control => { control.disabled = true; });
+  form.dataset.busy = "true";
+  efficiencyStatus.textContent = payload.action === "calibrate" ? "Calibrating with Ollama…" : "Saving…";
+  let result;
+  try {
+    const response = await fetch("/v1/efficiency", {
+      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Request failed");
+    result = data;
+    delete form.dataset.dirty;
+    efficiencyStatus.textContent = payload.action === "save" ? "Correction saved." : "Calibration finished. See the device result.";
+  } catch (error) {
+    efficiencyStatus.textContent = error.message;
+  } finally {
+    delete form.dataset.busy;
+    controls.forEach((control, index) => { control.disabled = disabled[index]; });
+  }
+  if (result) {
+    showEfficiency(result, form);
+    loadEfficiency();
+  }
+}
+
+let efficiencyRequestInProgress = false;
+async function loadEfficiency() {
+  if (efficiencyRequestInProgress || efficiencySettings.querySelector("[data-busy]")) return;
+  efficiencyRequestInProgress = true;
+  try {
+    const response = await fetch("/v1/efficiency", {cache:"no-store"});
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const result = await response.json();
+    if (!efficiencySettings.querySelector("[data-busy]")) showEfficiency(result);
+  } catch (error) {
+    efficiencyStatus.textContent = "Efficiency settings unavailable. " + error.message;
+  } finally {
+    efficiencyRequestInProgress = false;
+  }
+}
+
+
 const controls = [
   ["ac","AC output","Turn the AC inverter/output on or off.","toggle"],
   ["dc","12V DC output","Turn the 12V DC output on or off.","toggle"],
@@ -603,7 +697,7 @@ function makeTuningControl(key) {
   wrap.dataset.tuningDevice = key;
   wrap.innerHTML = `<h3>Reserve setpoint tuning</h3>
     <p>Auto applies monthly changes. Review shows a recommendation for you to apply manually.
-    Off pauses tuning. <a href="/history#efficiency-correction">Power efficiency calibration</a></p>
+    Off pauses tuning. <a href="#efficiency-correction">Power efficiency calibration</a></p>
     <form class="row">
       <label>Mode <select name="mode">
         <option value="off">Off</option>
@@ -797,6 +891,8 @@ async function setControl(key, control, value) {
 
 load();
 setInterval(load, 2000);
+loadEfficiency();
+setInterval(loadEfficiency, 30000);
 </script></main></body></html>"""
 
 

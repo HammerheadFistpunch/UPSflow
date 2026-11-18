@@ -13,9 +13,6 @@ nav .active{background:#344054;color:white}
 section{margin-top:20px;background:white;border:1px solid #d9dee5;border-radius:10px;padding:16px}
 svg{display:block;width:100%;height:auto;margin-top:14px;color:#344054}
 #sample{min-height:1.3em;color:#344054;font-variant-numeric:tabular-nums}
-#efficiency-settings form{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:12px 0}
-#efficiency-settings input[type=number]{width:6em}
-#efficiency-settings small{flex-basis:100%}
 #status{color:#475467;min-height:1.3em}.server{color:#175cd3}.network{color:#a33b08}
 </style>
 </head>
@@ -56,12 +53,7 @@ svg{display:block;width:100%;height:auto;margin-top:14px;color:#344054}
 <p id="sample">Hover or tap the chart to inspect a sample.</p>
 <p id="status" role="status">Loading history…</p>
 </section>
-<section id="efficiency-correction" aria-label="Efficiency correction">
-<h2>Efficiency correction</h2>
-<p>Subtract a percentage of DC input from reported net power whenever DC input is active and the AC inverter is enabled.</p>
-<div id="efficiency-settings"></div>
-<p id="efficiency-status" role="status"></p>
-</section>
+
 </main>
 <script>
 const metric = document.getElementById("metric");
@@ -73,90 +65,6 @@ const sample = document.getElementById("sample");
 const inspectHint = sample.textContent;
 let request;
 const corrected = document.getElementById("corrected");
-const efficiencySettings = document.getElementById("efficiency-settings");
-const efficiencyStatus = document.getElementById("efficiency-status");
-
-function showEfficiency(data, updatedForm) {
-  for (const [key, item] of Object.entries(data.devices)) {
-    let form = document.getElementById("efficiency-" + key);
-    if (!form) {
-      form = document.createElement("form");
-      form.id = "efficiency-" + key;
-      form.innerHTML = '<strong></strong> <label>DC input loss (%) <input name="percent" type="number" min="0" max="100" step="0.01" required></label>'
-        + '<label><input name="auto" type="checkbox"> Monthly Ollama calibration</label>'
-        + '<button type="submit">Save</button><button type="button" name="calibrate">Calibrate now</button>'
-        + '<small></small>';
-      form.querySelector("strong").textContent = key === "server" ? "Server" : "Network";
-      form.addEventListener("input", () => {
-        form.dataset.dirty = "true";
-        form.elements.calibrate.disabled = true;
-      });
-      form.onsubmit = event => {
-        event.preventDefault();
-        updateEfficiency(form, {device:key, action:"save", correction_percent:form.elements.percent.valueAsNumber,
-          auto:form.elements.auto.checked});
-      };
-      form.elements.calibrate.onclick = () => updateEfficiency(form, {device:key, action:"calibrate"});
-      efficiencySettings.append(form);
-    }
-    if (form.dataset.busy) continue;
-    if (!form.dataset.dirty && (form === updatedForm || !form.contains(document.activeElement))) {
-      form.elements.percent.value = item.correction_percent ?? "";
-      form.elements.auto.checked = item.auto;
-    }
-    form.elements.auto.disabled = !data.ollama_model && !item.auto;
-    form.elements.calibrate.disabled = !data.ollama_model || item.calibrating || !!form.dataset.dirty;
-    form.querySelector("small").textContent = item.calibrating ? "Calibrating…" :
-      [item.legacy_loss_watts ? `Previous ${item.legacy_loss_watts} W correction is active until you save or calibrate a percentage.` : "",
-        item.reason || (data.ollama_model ? "" : "Enable long-term history and configure Ollama for calibration.")]
-        .filter(Boolean).join(" ");
-  }
-}
-
-async function updateEfficiency(form, payload) {
-  const controls = [...form.elements];
-  const disabled = controls.map(control => control.disabled);
-  controls.forEach(control => { control.disabled = true; });
-  form.dataset.busy = "true";
-  efficiencyStatus.textContent = payload.action === "calibrate" ? "Calibrating with Ollama…" : "Saving…";
-  let result;
-  try {
-    const response = await fetch("/v1/efficiency", {
-      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || "Request failed");
-    result = data;
-    delete form.dataset.dirty;
-    efficiencyStatus.textContent = payload.action === "save" ? "Correction saved." : "Calibration finished. See the device result.";
-  } catch (error) {
-    efficiencyStatus.textContent = error.message;
-  } finally {
-    delete form.dataset.busy;
-    controls.forEach((control, index) => { control.disabled = disabled[index]; });
-  }
-  if (result) {
-    showEfficiency(result, form);
-    load();
-  }
-}
-
-let efficiencyRequestInProgress = false;
-async function loadEfficiency() {
-  if (efficiencyRequestInProgress || efficiencySettings.querySelector("[data-busy]")) return;
-  efficiencyRequestInProgress = true;
-  try {
-    const response = await fetch("/v1/efficiency", {cache:"no-store"});
-    if (!response.ok) throw new Error("HTTP " + response.status);
-    const result = await response.json();
-    if (!efficiencySettings.querySelector("[data-busy]")) showEfficiency(result);
-  } catch (error) {
-    efficiencyStatus.textContent = "Efficiency settings unavailable. " + error.message;
-  } finally {
-    efficiencyRequestInProgress = false;
-  }
-}
-
 function draw(data, reading, range, overlay) {
   plot.replaceChildren();
   const samples = data.samples;
@@ -340,8 +248,7 @@ corrected.addEventListener("change", () => {
   load();
 });
 load();
-loadEfficiency();
-setInterval(() => { load(); loadEfficiency(); }, 30000);
+setInterval(load, 30000);
 </script>
 </body>
 </html>
