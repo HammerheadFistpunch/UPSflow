@@ -31,7 +31,7 @@ def test_monthly_cell_temperature_uses_archived_raw_readings(tmp_path, monkeypat
         history_window({"minutes": ["43201"]})
 
 
-def test_efficiency_calibration_data_and_overlay_use_dc_only_windows(tmp_path, monkeypatch):
+def test_efficiency_calibration_data_and_overlay_use_all_dc_sources(tmp_path, monkeypatch):
     from efficiency import balance_days
 
     now = 2_000_000_000_000
@@ -50,11 +50,16 @@ def test_efficiency_calibration_data_and_overlay_use_dc_only_windows(tmp_path, m
 
     query = {"minutes": ["60"], "metric": ["net_watts"]}
     assert history.read(query)["samples"][0] == (start, 30.5, 20.5)
-    assert history.read(query, {"network": 20.5, "server": 20.5})["samples"][0] == (
+    assert history.read(query, {"network": (25, 0), "server": (25, 0)})["samples"][0] == (
+        start, 30.5, 20.5, 19.5, 9.5
+    )
+    assert history.read(query, {"network": (None, 20.5)})["samples"][0] == (
         start, 30.5, 20.5, None, 0
     )
-    assert balance_days(history, "server", start, now) == []
-    [network_day] = balance_days(history, "network", start, now)
+    assert balance_days(history, "server", start, now, 25)[0]["corrected_net_watts"] == 19.5
+    [network_day] = balance_days(history, "network", start, now, 25)
     assert network_day["windows"] == 1
     assert network_day["net_watts"] == 20.5
+    assert network_day["corrected_net_watts"] == 9.5
+    assert network_day["target_percent"] == 46.59
     assert balance_days(history, "network", start + 60_000, now) == []

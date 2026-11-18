@@ -58,7 +58,7 @@ svg{display:block;width:100%;height:auto;margin-top:14px;color:#344054}
 </section>
 <section id="efficiency-correction" aria-label="Efficiency correction">
 <h2>Efficiency correction</h2>
-<p>Subtract estimated losses in watts from reported net power when DC is the only input and the AC inverter is enabled.</p>
+<p>Subtract a percentage of DC input from reported net power whenever DC input is active and the AC inverter is enabled.</p>
 <div id="efficiency-settings"></div>
 <p id="efficiency-status" role="status"></p>
 </section>
@@ -82,7 +82,7 @@ function showEfficiency(data, updatedForm) {
     if (!form) {
       form = document.createElement("form");
       form.id = "efficiency-" + key;
-      form.innerHTML = '<strong></strong> <label>Loss (W) <input name="watts" type="number" min="0" max="100" step="0.01" required></label>'
+      form.innerHTML = '<strong></strong> <label>DC input loss (%) <input name="percent" type="number" min="0" max="100" step="0.01" required></label>'
         + '<label><input name="auto" type="checkbox"> Monthly Ollama calibration</label>'
         + '<button type="submit">Save</button><button type="button" name="calibrate">Calibrate now</button>'
         + '<small></small>';
@@ -93,7 +93,7 @@ function showEfficiency(data, updatedForm) {
       });
       form.onsubmit = event => {
         event.preventDefault();
-        updateEfficiency(form, {device:key, action:"save", correction_watts:form.elements.watts.valueAsNumber,
+        updateEfficiency(form, {device:key, action:"save", correction_percent:form.elements.percent.valueAsNumber,
           auto:form.elements.auto.checked});
       };
       form.elements.calibrate.onclick = () => updateEfficiency(form, {device:key, action:"calibrate"});
@@ -101,13 +101,15 @@ function showEfficiency(data, updatedForm) {
     }
     if (form.dataset.busy) continue;
     if (!form.dataset.dirty && (form === updatedForm || !form.contains(document.activeElement))) {
-      form.elements.watts.value = item.correction_watts;
+      form.elements.percent.value = item.correction_percent ?? "";
       form.elements.auto.checked = item.auto;
     }
     form.elements.auto.disabled = !data.ollama_model && !item.auto;
     form.elements.calibrate.disabled = !data.ollama_model || item.calibrating || !!form.dataset.dirty;
     form.querySelector("small").textContent = item.calibrating ? "Calibrating…" :
-      item.reason || (data.ollama_model ? "" : "Enable long-term history and configure Ollama for calibration.");
+      [item.legacy_loss_watts ? `Previous ${item.legacy_loss_watts} W correction is active until you save or calibrate a percentage.` : "",
+        item.reason || (data.ollama_model ? "" : "Enable long-term history and configure Ollama for calibration.")]
+        .filter(Boolean).join(" ");
   }
 }
 

@@ -98,10 +98,13 @@ class TelemetryHistory:
                         CASE WHEN json_extract(network, '$.connected') = 1
                               AND json_extract(network, '$.stale') = 0
                              THEN json_extract(network, '$.net_watts') END,
-                        CASE WHEN {qualifies} THEN json_extract(server, '$.net_watts') - ? END,
-                        CASE WHEN {network_qualifies} THEN json_extract(network, '$.net_watts') - ? END
+                        CASE WHEN {qualifies} THEN json_extract(server, '$.net_watts')
+                            - coalesce(json_extract(server, '$.dc_in_watts') * ? / 100.0, ?) END,
+                        CASE WHEN {network_qualifies} THEN json_extract(network, '$.net_watts')
+                            - coalesce(json_extract(network, '$.dc_in_watts') * ? / 100.0, ?) END
                     FROM readings ORDER BY timestamp_ms, id
-                """, (start, end, corrections.get("server"), corrections.get("network")))
+                """, (start, end, *corrections.get("server", (None, None)),
+                      *corrections.get("network", (None, None))))
                 return {**result, "start_ms": start, "end_ms": end, "samples": list(rows)}
 
             if metric:

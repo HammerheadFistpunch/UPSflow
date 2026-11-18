@@ -9,14 +9,14 @@ import sqlite3
 import sys
 import tempfile
 import time
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
 from ble_recovery import BLEWatchdog, DeviceState
 from efficiency import balance_days, valid_correction
-from long_term import LongTermHistory, midnight, number, read_rows
+from long_term import LongTermHistory, number, read_rows
 from ollama_tuning import choose_efficiency, choose_reserve, ollama_settings
 from power_control import checked_state, execute_power, power_state
 from telemetry_history import TelemetryHistory
@@ -1174,21 +1174,33 @@ class TuningPanel:
         self.calibrating = set()
         for key in self.keys:
             options = self.efficiency_options(key)
-            if not isinstance(options, dict) or not valid_correction(options.get("correction_watts", 0)):
-                raise SystemExit(f"{key}: efficiency correction must be between 0 and 100 W")
+            if not isinstance(options, dict) or not valid_correction(
+                options.get("correction_percent", options.get("correction_watts", 0))
+            ):
+                raise SystemExit(f"{key}: efficiency correction must be between 0 and 100")
 
     def efficiency_options(self, key):
         return self.config["devices"][key].get("efficiency_correction", {})
 
+    def correction(self, key):
+        options = self.efficiency_options(key)
+        if "correction_percent" in options:
+            return options["correction_percent"], 0
+        if options.get("correction_watts"):
+            return None, options["correction_watts"]
+        return 0, 0
+
     def corrections(self):
-        return {key: self.efficiency_options(key).get("correction_watts", 0) for key in self.keys}
+        return {key: self.correction(key) for key in self.keys}
 
     def efficiency_status(self):
         devices = {}
         for key in self.keys:
             options = self.efficiency_options(key)
+            percent, legacy = self.correction(key)
             devices[key] = {
-                "correction_watts": options.get("correction_watts", 0),
+                "correction_percent": percent,
+                "legacy_loss_watts": legacy,
                 "auto": options.get("auto") is True,
                 "reason": options.get("reason"),
                 "last_auto_month": options.get("last_auto_month"),
@@ -1210,14 +1222,14 @@ class TuningPanel:
                 raise ValueError("Enable long-term history and configure Ollama to calibrate")
             await self.calibrate_efficiency(key)
         elif action == "save":
-            watts, auto = payload.get("correction_watts"), payload.get("auto")
-            if not valid_correction(watts) or type(auto) is not bool:
-                raise ValueError("Enter a correction between 0 and 100 W")
+            percent, auto = payload.get("correction_percent"), payload.get("auto")
+            if not valid_correction(percent) or type(auto) is not bool:
+                raise ValueError("Enter a loss percentage between 0 and 100")
             if auto and not self.ollama:
                 raise ValueError("Enable long-term history and configure Ollama for monthly calibration")
             async with CONTROL_LOCK:
                 await self.set_efficiency(key, {
-                    "correction_watts": round(watts, 2), "auto": auto, "reason": "Saved manually.",
+                    "correction_percent": round(percent, 2), "auto": auto, "reason": "Saved manually.",
                 })
         else:
             raise ValueError("Unknown efficiency action")
@@ -1228,26 +1240,25 @@ class TuningPanel:
         self.calibrating.add(key)
         try:
             previous = self.efficiency_options(key)
-            if month:
-                start = midnight((month - timedelta(days=1)).replace(day=1))
-                end = midnight(month)
-            else:
-                end = time.time_ns() // 1_000_000
-                start = end - 30 * 86_400_000
-            days = await asyncio.to_thread(balance_days, self.archive.history, key, start, end)
+            percent, legacy = self.correction(key)
+            end = time.time_ns() // 1_000_000
+            start = end - 7 * 86_400_000
+            days = await asyncio.to_thread(
+                balance_days, self.archive.history, key, start, end, percent, legacy
+            )
             windows = sum(day["windows"] for day in days)
             proposed = None
             if not days or (month and len(days) < 3):
                 reason = ("Insufficient steady battery data. Monthly calibration requires three "
-                          "qualifying days in the previous month." if month else
-                          "No qualifying steady battery window in the last 30 days.")
+                          "qualifying days in the last seven days." if month else
+                          "No qualifying steady battery window in the last seven days.")
             else:
                 proposed, reason = await asyncio.to_thread(
-                    choose_efficiency, self.ollama, days, previous.get("correction_watts", 0)
+                    choose_efficiency, self.ollama, days, percent, legacy
                 )
             updates = {"reason": f"{reason} ({windows} windows across {len(days)} days.)"}
             if proposed is not None:
-                updates["correction_watts"] = proposed
+                updates["correction_percent"] = proposed
             if month:
                 updates["last_auto_month"] = month.isoformat()
             async with CONTROL_LOCK:

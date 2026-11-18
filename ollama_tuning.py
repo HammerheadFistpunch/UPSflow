@@ -7,7 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from efficiency import MAX_CORRECTION_WATTS, valid_correction
+from efficiency import MAX_CORRECTION_PERCENT, valid_correction
 from long_term import matching_days, recommendation
 
 
@@ -104,11 +104,11 @@ def chat_json(url, body):
     return json.loads(reply["message"]["content"])
 
 
-def choose_efficiency(settings, days, current):
+def choose_efficiency(settings, days, current, legacy_watts=0):
     url, model = settings
-    reference = median(day["net_watts"] for day in days)
+    reference = median(day["target_percent"] for day in days)
     lower = max(0, round(reference - 2, 2))
-    upper = min(MAX_CORRECTION_WATTS, round(reference + 2, 2))
+    upper = min(MAX_CORRECTION_PERCENT, round(reference + 2, 2))
     body = {
         "model": model,
         "stream": False,
@@ -117,30 +117,31 @@ def choose_efficiency(settings, days, current):
         "format": {
             "type": "object",
             "properties": {
-                "correction_watts": {"type": "number", "minimum": lower, "maximum": upper},
+                "correction_percent": {"type": "number", "minimum": lower, "maximum": upper},
                 "reason": {"type": "string"},
             },
-            "required": ["correction_watts", "reason"],
+            "required": ["correction_percent", "reason"],
         },
         "messages": [
             {"role": "system", "content": (
-                "Calibrate an apparent power loss in watts for one UPS on DC input with "
-                "its AC inverter enabled. Corrected net power equals reported net minus "
-                "this loss. Each day summarizes near-hour windows of steady reported "
-                "state of charge. Choose a correction within the supplied bounds that "
-                "brings typical net power close to zero. Use the median as the default. "
-                "These are estimated losses at the observed loads. If evidence is mixed, "
-                "explain why. Return the correction and a concise reason."
+                "Calibrate apparent losses as a percentage of DC input for a UPS with "
+                "its AC inverter on. Corrected net equals raw net minus DC input times "
+                "the loss fraction. Windows have steady reported state of charge. The "
+                "difference between raw and corrected net is the applied correction; the "
+                "corrected net is the residual to close. Each day includes a target percent "
+                "calculated from both. Use the median target as the default, stay within "
+                "the supplied bounds, and return the percentage and a concise reason."
             )},
             {"role": "user", "content": json.dumps({
-                "current_correction_watts": current, "median_net_watts": reference,
-                "minimum_watts": lower, "maximum_watts": upper, "days": days,
+                "current_correction_percent": current, "legacy_loss_watts": legacy_watts,
+                "median_target_percent": reference, "minimum_percent": lower,
+                "maximum_percent": upper, "days": days,
             })},
         ],
     }
     try:
         result = chat_json(url, body)
-        proposed, reason = result["correction_watts"], result["reason"]
+        proposed, reason = result["correction_percent"], result["reason"]
         if (not valid_correction(proposed) or not lower <= proposed <= upper
                 or not isinstance(reason, str) or not reason.strip()):
             raise ValueError("invalid recommendation")
